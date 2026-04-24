@@ -1,137 +1,41 @@
 """
-symbol_provider.py — Live index constituent fetcher
+Symbol provider — fetches live NSE index constituents.
 
-Fetches current Nifty 50 / Next 50 / 100 / 200 constituents from NSE.
-Falls back to a hardcoded list if the API is unavailable.
-
-Supported indices (pass as the `index` argument):
-    "NIFTY 50"       → 50 stocks
-    "NIFTY NEXT 50"  → next 50 (ranks 51-100)
-    "NIFTY 100"      → both combined (recommended for swing trading)
-    "NIFTY 200"      → top 200
-
-Usage:
-    from symbol_provider import get_symbols
-
-    symbols = get_symbols("NIFTY 100")
-    # Returns ["HDFCBANK", "RELIANCE", "INFY", ...]
-
-The live fetch is tried first. If NSE is unreachable or returns bad data,
-the hardcoded fallback is used and a warning is printed.
-Symbols are cached in memory for the session so the API is only hit once per run.
+Handles two known Yahoo Finance quirks for Indian stocks:
+  1. Symbols with '&' (M&M, M&MFIN, GVT&D) → strip '&' for Yahoo ticker
+  2. Index name itself sometimes appears in constituent list → filtered out
 """
 
 import requests
-import time
-from typing import Optional
 
-# ── NSE API ───────────────────────────────────────────────────────────────────
-NSE_INDEX_API  = "https://www.nseindia.com/api/equity-stockIndices?index={index}"
-NSE_HEADERS    = {
-    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept":          "application/json, text/plain, */*",
-    "Referer":         "https://www.nseindia.com/",
-    "Accept-Language": "en-US,en;q=0.9",
+# ── Yahoo Finance ticker exceptions ───────────────────────────────────────────
+# Symbols that need special mapping for Yahoo Finance
+# Format: NSE_SYMBOL → Yahoo_suffix (without .NS)
+YAHOO_EXCEPTIONS = {
+    "M&M":       "MM",
+    "M&MFIN":    "MMFIN",
+    "GVT&D":     "GVTD",
+    "L&TFH":     "L&TFH",     # works as-is with URL encoding
+    "BAJAJ-AUTO":"BAJAJ-AUTO", # works as-is
 }
 
-# ── In-memory cache ───────────────────────────────────────────────────────────
-_cache: dict = {}
+# ── Index name patterns to filter from constituent lists ──────────────────────
+# NSE sometimes returns the index name as a symbol in the list
+INDEX_KEYWORDS = {
+    "NIFTY", "SENSEX", "MIDCAP", "SMALLCAP", "LARGECAP",
+    "NEXT50", "NEXT 50", "NIFTY50", "NIFTY 50",
+}
 
+# ── NSE index constituent URLs ────────────────────────────────────────────────
+INDEX_URLS = {
+    "NIFTY 50":      "https://archives.nseindia.com/content/indices/ind_nifty50list.csv",
+    "NIFTY 100":     "https://archives.nseindia.com/content/indices/ind_nifty100list.csv",
+    "NIFTY 200":     "https://archives.nseindia.com/content/indices/ind_nifty200list.csv",
+    "NIFTY NEXT 50": "https://archives.nseindia.com/content/indices/ind_niftynext50list.csv",
+}
 
-def get_symbols(index: str = "NIFTY 100") -> list[str]:
-    """
-    Return the current constituent symbols for the given NSE index.
-
-    Args:
-        index: One of "NIFTY 50", "NIFTY NEXT 50", "NIFTY 100", "NIFTY 200"
-
-    Returns:
-        List of NSE symbols e.g. ["HDFCBANK", "RELIANCE", ...]
-    """
-    index = index.upper().strip()
-
-    if index in _cache:
-        return _cache[index]
-
-    # Special case: NIFTY 100 = NIFTY 50 + NIFTY NEXT 50
-    if index == "NIFTY 100":
-        n50      = _fetch_or_fallback("NIFTY 50")
-        next50   = _fetch_or_fallback("NIFTY NEXT 50")
-        combined = _merge_unique(n50, next50)
-        _cache[index] = combined
-        print(f"[Symbols] NIFTY 100: {len(combined)} stocks "
-              f"(Nifty 50: {len(n50)} + Next 50: {len(next50)})")
-        return combined
-
-    symbols = _fetch_or_fallback(index)
-    _cache[index] = symbols
-    return symbols
-
-
-def _fetch_or_fallback(index: str) -> list[str]:
-    """Try live NSE API, fall back to hardcoded list on any failure."""
-    live = _fetch_live(index)
-    if live:
-        print(f"[Symbols] {index}: fetched {len(live)} stocks from NSE (live)")
-        return live
-
-    fallback = _get_fallback(index)
-    print(f"[Symbols] {index}: NSE API unavailable — using hardcoded fallback "
-          f"({len(fallback)} stocks). May be outdated if index rebalanced.")
-    return fallback
-
-
-def _fetch_live(index: str) -> Optional[list[str]]:
-    """
-    Fetch current constituents from NSE's public equity index API.
-    Returns None on any failure so the caller can fall back gracefully.
-    """
-    try:
-        session = requests.Session()
-        # NSE requires a session cookie from the main page first
-        session.get("https://www.nseindia.com/", headers=NSE_HEADERS, timeout=10)
-        time.sleep(1)
-
-        url  = NSE_INDEX_API.format(index=requests.utils.quote(index))
-        resp = session.get(url, headers=NSE_HEADERS, timeout=15)
-
-        if resp.status_code != 200:
-            print(f"  [Symbols] NSE API returned {resp.status_code} for {index}")
-            return None
-
-        data  = resp.json()
-        rows  = data.get("data", [])
-
-        # Skip the first row — it's the index itself, not a constituent
-        symbols = []
-        for row in rows:
-            sym = row.get("symbol", "").strip()
-            if sym and sym != index.replace(" ", ""):
-                symbols.append(sym)
-
-        return symbols if len(symbols) > 10 else None
-
-    except Exception as e:
-        print(f"  [Symbols] NSE API error for {index}: {e}")
-        return None
-
-
-def _merge_unique(list_a: list, list_b: list) -> list:
-    """Combine two lists preserving order and removing duplicates."""
-    seen = set()
-    result = []
-    for sym in list_a + list_b:
-        if sym not in seen:
-            seen.add(sym)
-            result.append(sym)
-    return result
-
-
-# ── Hardcoded fallbacks ───────────────────────────────────────────────────────
-# Updated as of April 2026. Used only when NSE API is unreachable.
-# Run `python symbol_provider.py` to check if live fetch is working.
-
-_NIFTY_50_FALLBACK = [
+# ── Hardcoded fallback lists ───────────────────────────────────────────────────
+NIFTY_50_FALLBACK = [
     "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
     "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BPCL", "BHARTIARTL",
     "BRITANNIA", "CIPLA", "COALINDIA", "DIVISLAB", "DRREDDY",
@@ -144,66 +48,152 @@ _NIFTY_50_FALLBACK = [
     "TECHM", "TITAN", "ULTRACEMCO", "WIPRO", "ZOMATO",
 ]
 
-_NIFTY_NEXT_50_FALLBACK = [
-    "ABB", "AMBUJACEM", "ATGL", "AUBANK", "BANKBARODA",
-    "BERGEPAINT", "BEL", "BOSCHLTD", "CANBK", "CGPOWER",
-    "CHOLAFIN", "COLPAL", "DLF", "DMART", "GAIL",
-    "GODREJCP", "HAVELLS", "ICICIGI", "ICICIPRULI", "IOC",
-    "IRCTC", "JINDALSTEL", "LICI", "LTIM", "LTTS",
-    "LUPIN", "MAXHEALTH", "MCDOWELL-N", "MPHASIS", "NHPC",
-    "NMDC", "NAUKRI", "OBEROIRLTY", "OFSS", "PIIND",
-    "PGHH", "PNB", "PAGEIND", "PERSISTENT", "PIDILITIND",
-    "POLYCAB", "RECLTD", "SAIL", "SIEMENS", "TORNTPHARM",
-    "TRENT", "TVSMOTOR", "UPL", "VEDL", "ZYDUSLIFE",
-]
 
-_NIFTY_200_EXTRA_FALLBACK = [
-    # Ranks 101-200 — lower liquidity, use with caution for swing trading
-    "ABCAPITAL", "APLAPOLLO", "ASTRAL", "AUROPHARMA", "BANDHANBNK",
-    "BHARATFORG", "BIOCON", "CAMS", "CONCOR", "CROMPTON",
-    "CUMMINSIND", "DALBHARAT", "DIXON", "FLUOROCHEM", "FORTIS",
-    "GLENMARK", "GMRINFRA", "GODREJIND", "GUJGASLTD", "HFCL",
-    "IDBI", "IIFL", "IPCALAB", "JUBLFOOD", "KALYANKJIL",
-    "KPITTECH", "LAURUSLABS", "MARICO", "MFSL", "MUTHOOTFIN",
-    "NATIONALUM", "NYKAA", "PAYTM", "PNBHOUSING", "POLICYBZR",
-    "PRINCEPIPE", "PVRINOX", "RAJESHEXPO", "RAMCOCEM", "SBICARD",
-    "SNOWMAN", "SOBHA", "SOLARINDS", "STARHEALTH", "SUMICHEM",
-    "SUNTV", "SUPREMEIND", "SYNGENE", "TATACOMM", "TIINDIA",
-]
+def get_symbols(index: str = "NIFTY 50") -> list:
+    """
+    Returns NSE symbols for the given index.
+    Tries live NSE CSV first, falls back to hardcoded list.
 
+    Filters out:
+    - Index name tokens (e.g. "NIFTY 200" appearing as a symbol)
+    - Duplicates
+    - Non-stock entries
+    """
+    index = index.upper().strip()
+    url   = INDEX_URLS.get(index)
 
-def _get_fallback(index: str) -> list[str]:
-    if index == "NIFTY 50":
-        return _NIFTY_50_FALLBACK[:]
-    if index == "NIFTY NEXT 50":
-        return _NIFTY_NEXT_50_FALLBACK[:]
-    if index == "NIFTY 200":
-        return (_NIFTY_50_FALLBACK +
-                _NIFTY_NEXT_50_FALLBACK +
-                _NIFTY_200_EXTRA_FALLBACK)
-    return _NIFTY_50_FALLBACK[:]   # default
+    if url:
+        symbols = _fetch_from_nse(url)
+        if symbols:
+            return _clean(symbols)
+
+    # Fallback for Nifty 50
+    if index in ("NIFTY 50", "NIFTY50"):
+        print(f"  [symbol_provider] Using fallback list for {index}")
+        return _clean(NIFTY_50_FALLBACK)
+
+    # For other indices, return empty — caller handles error
+    print(f"  [symbol_provider] No data for index: {index}")
+    return []
 
 
-# ── Yahoo Finance ticker mapping ──────────────────────────────────────────────
-# NSE symbol → Yahoo Finance ticker (most are symbol + .NS)
-# Exceptions are listed here; everything else gets .NS appended automatically.
-YAHOO_EXCEPTIONS = {
-    "M&M":        "MM.NS",
-    "BAJAJ-AUTO": "BAJAJ-AUTO.NS",
-    "MCDOWELL-N": "MCDOWELL-N.NS",
-}
+def to_yahoo_ticker(symbol: str, exchange: str = "NS") -> str:
+    """
+    Converts an NSE symbol to a Yahoo Finance ticker.
 
-def to_yahoo_ticker(symbol: str) -> str:
-    """Convert NSE symbol to Yahoo Finance ticker."""
-    return YAHOO_EXCEPTIONS.get(symbol, f"{symbol}.NS")
+    Examples:
+      HDFCBANK  → HDFCBANK.NS
+      M&M       → MM.NS         (& stripped — Yahoo doesn't support it)
+      BAJAJ-AUTO→ BAJAJ-AUTO.NS (hyphen works fine)
+      GVT&D     → GVTD.NS
+    """
+    symbol = symbol.upper().strip()
+
+    # Check exception map first
+    if symbol in YAHOO_EXCEPTIONS:
+        return f"{YAHOO_EXCEPTIONS[symbol]}.{exchange}"
+
+    # Strip & for Yahoo Finance (they don't support it in tickers)
+    yahoo_sym = symbol.replace("&", "")
+    return f"{yahoo_sym}.{exchange}"
 
 
-# ── Test ──────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("Testing live NSE fetch...\n")
+# ── Private helpers ───────────────────────────────────────────────────────────
 
-    for idx in ["NIFTY 50", "NIFTY NEXT 50", "NIFTY 100"]:
-        syms = get_symbols(idx)
-        print(f"{idx}: {len(syms)} stocks")
-        print(f"  First 5:  {syms[:5]}")
-        print(f"  Last 5:   {syms[-5:]}\n")
+def _fetch_from_nse(url: str) -> list:
+    """Fetch constituent list from NSE CSV endpoint."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept":     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer":    "https://www.nseindia.com/",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code != 200:
+            print(f"  [symbol_provider] NSE returned {r.status_code} for {url}")
+            return []
+
+        lines   = r.text.strip().split("\n")
+        symbols = []
+
+        # NSE CSV columns: Company Name, Industry, Symbol, Series, ISIN Code
+        # Column 0 = company name  e.g. "Adani Enterprises Limited"
+        # Column 2 = NSE symbol    e.g. "ADANIENT"  ← this is what we need
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            if len(parts) < 3:
+                continue
+            symbol = parts[2].strip().strip('"').upper()
+            if symbol:
+                symbols.append(symbol)
+
+        print(f"  [symbol_provider] Fetched {len(symbols)} symbols from NSE")
+        return symbols
+
+    except Exception as e:
+        print(f"  [symbol_provider] NSE fetch error: {e}")
+        return []
+
+
+def _clean(symbols: list) -> list:
+    """
+    Remove index names, duplicates, and invalid entries from symbol list.
+
+    Key fix: NSE sometimes includes the index name (e.g. 'NIFTY 200')
+    as the first entry in the CSV constituent list. This filters those out.
+    """
+    seen   = set()
+    result = []
+
+    for sym in symbols:
+        sym = sym.strip().upper()
+
+        # Skip empty
+        if not sym:
+            continue
+
+        # Skip index name entries (e.g. "NIFTY 200", "NIFTY 50")
+        if _is_index_name(sym):
+            print(f"  [symbol_provider] Filtered index token: {sym}")
+            continue
+
+        # Skip duplicates
+        if sym in seen:
+            continue
+
+        seen.add(sym)
+        result.append(sym)
+
+    return result
+
+
+def _is_index_name(sym: str) -> bool:
+    """
+    Returns True if the symbol looks like an index name rather than a stock.
+
+    Catches:
+      "NIFTY 200"  → True
+      "NIFTY50"    → True
+      "HDFCBANK"   → False
+      "M&M"        → False
+    """
+    # Direct match
+    if sym in INDEX_KEYWORDS:
+        return True
+
+    # Starts with NIFTY or SENSEX followed by space or digits
+    for kw in ("NIFTY", "SENSEX"):
+        if sym.startswith(kw) and (len(sym) == len(kw) or
+                                    sym[len(kw)] in " 0123456789"):
+            return True
+
+    # Contains a space and starts with index keyword (e.g. "NIFTY 200")
+    if " " in sym:
+        first_word = sym.split()[0]
+        if first_word in ("NIFTY", "SENSEX", "MIDCAP", "SMALLCAP"):
+            return True
+
+    return False

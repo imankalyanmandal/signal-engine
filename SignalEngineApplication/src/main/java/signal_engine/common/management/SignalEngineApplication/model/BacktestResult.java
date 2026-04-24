@@ -2,6 +2,7 @@ package signal_engine.common.management.SignalEngineApplication.model;
 
 import java.util.List;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Builder;
 import lombok.Data;
 import lombok.Getter;
@@ -13,96 +14,125 @@ import lombok.Setter;
 @Setter
 public class BacktestResult {
 
+    // ── Core metrics ──────────────────────────────────────────────────────────
     private int    totalTrades;
-    private double winRate;          // 0–100
+    private double winRate;          // percentage 0-100
     private double finalCapital;
-    private List<Trade> trades;
-
     private double totalProfit;
     private double returnPercent;
-    private double maxDrawdown;      // percentage e.g. 3.5 = 3.5%
+    private double maxDrawdown;      // percentage 0-100
+
+    // ── Quality metrics ───────────────────────────────────────────────────────
+    private double profitFactor;     // capped at 99.99 for valid JSON
     private double avgWinSize;
     private double avgLossSize;
-    private double sharpeRatio;      // per-trade annualised
+    private double sharpeRatio;
 
-    /** Buy-and-hold return over same period — strategy benchmark */
-    private double benchmarkReturn;
+    // ── Benchmark comparison ──────────────────────────────────────────────────
+    private double benchmarkReturn;  // buy-and-hold return over same period
 
-    /**
-     * Profit factor capped at 99.99.
-     * Double.POSITIVE_INFINITY is not valid JSON — cap it here.
-     */
-    private double profitFactor;
+    // ── Trade list ────────────────────────────────────────────────────────────
+    // Uses BacktestTrade (Layer 1 simulation) NOT the JPA Trade entity
+    private List<BacktestTrade> trades;
 
-    public void setProfitFactor(double value) {
-        this.profitFactor = (Double.isInfinite(value) || Double.isNaN(value))
-                ? 99.99
-                : Math.min(99.99, value);
+    // ── profitFactor setter caps Infinity at 99.99 for valid JSON ─────────────
+    public void setProfitFactor(double pf) {
+        this.profitFactor = Double.isInfinite(pf) || Double.isNaN(pf) ? 99.99 : pf;
     }
 
-    // ── Computed metrics ──────────────────────────────────────────────────
+    // ── Computed properties (not persisted, not in builder) ───────────────────
 
-    /** Alpha: how much the strategy outperformed buy-and-hold */
+    /**
+     * Alpha = strategy return minus buy-and-hold return.
+     * Positive alpha means the strategy beats passive holding.
+     */
     public double getAlpha() {
         return returnPercent - benchmarkReturn;
     }
 
-    /** Risk:Reward ratio of average win vs average loss */
+    /**
+     * Risk-Reward Ratio = average win / |average loss|.
+     * Should be > 1.0 for a sustainable strategy.
+     */
     public double getRiskRewardRatio() {
-        if (avgLossSize == 0) return 0;
+        if (avgLossSize == 0) return 99.99;
         return avgWinSize / Math.abs(avgLossSize);
     }
 
-    /** Expected profit per trade */
+    /**
+     * Expectancy per trade in currency.
+     * (winRate/100 * avgWin) + ((1 - winRate/100) * avgLoss)
+     * Positive = edge exists.
+     */
     public double getExpectancyPerTrade() {
         double winProb = winRate / 100.0;
         return (winProb * avgWinSize) + ((1 - winProb) * avgLossSize);
     }
 
     /**
-     * Quality score 0–10.
+     * Quality score 0-10. Fixed from original (old version had broken RoR scaling).
      *
-     * Dimensions:
-     *   returnPercent  (0–3 pts) — 10% return = 3 pts, capped
-     *   sharpeRatio    (0–3 pts) — per-trade Sharpe, capped at 3
-     *   profitFactor   (0–2 pts) — PF of 3.0 = 2 pts
-     *   alpha vs bench (0–1 pt)  — outperforms buy-and-hold
-     *   trade count    penalty   — scaled down if < 10 trades
+     * Components:
+     *   Return percent  0-3 pts  (1% = 0.3pts, 10% = 3pts)
+     *   Sharpe ratio    0-3 pts  (capped at 3)
+     *   Profit factor   0-2 pts  (PF=2 gives full 2pts)
+     *   Win rate bonus  0-1 pt   (only above 55%)
+     *   Trade count penalty      (< 10 trades = unreliable data)
      */
     public double getQualityScore() {
         if (totalTrades == 0) return 0;
 
         double score = 0;
 
-        if (returnPercent > 0)
+        // 1. Return percent (0-3 pts)
+        if (returnPercent > 0) {
             score += Math.min(3.0, returnPercent * 0.3);
+        }
 
-        if (!Double.isNaN(sharpeRatio) && sharpeRatio > 0)
+        // 2. Sharpe ratio (0-3 pts)
+        if (sharpeRatio > 0) {
             score += Math.min(3.0, sharpeRatio);
+        }
 
-        double pf = Double.isInfinite(profitFactor) || Double.isNaN(profitFactor) ? 0 : profitFactor;
-        if (pf > 1.0)
-            score += Math.min(2.0, (pf - 1.0) * 0.5);
+        // 3. Profit factor (0-2 pts)
+        if (profitFactor > 1.0) {
+            score += Math.min(2.0, (profitFactor - 1.0) * 2.0);
+        }
 
-        if (getAlpha() > 0)
-            score += Math.min(1.0, getAlpha() * 0.1);
+        // 4. Win rate bonus (0-1 pt) — only above 55%
+        if (winRate > 55) {
+            score += Math.min(1.0, (winRate - 55.0) / 20.0);
+        }
 
-        // Penalise small sample — fewer than 10 trades is statistically weak
-        if (totalTrades < 10)
+        // 5. Penalty for too few trades (< 10 = statistically unreliable)
+        if (totalTrades < 10) {
             score *= (totalTrades / 10.0);
+        }
 
-        return Math.min(10.0, Math.max(0, score));
+        return Math.min(10.0, score);
     }
 
+    /**
+     * Plain-English assessment of the strategy quality.
+     */
     public String getAssessment() {
-        if (totalTrades == 0)  return "NO TRADES — strategy generated no signals";
-        if (totalTrades < 5)   return "INSUFFICIENT DATA — too few trades to assess";
-        if (returnPercent < 0) return "FAIL — strategy lost money";
+        if (totalTrades == 0)    return "NO TRADES — strategy generated no signals";
+        if (totalTrades < 5)     return "INSUFFICIENT DATA — too few trades to assess";
+        if (returnPercent < 0)   return "FAIL — strategy lost money";
 
         double q = getQualityScore();
-        if (q < 2) return "POOR — needs improvement";
-        if (q < 4) return "FAIR — acceptable but not exceptional";
-        if (q < 6) return "GOOD — solid strategy";
+        if (q < 3)  return "POOR — needs significant improvement";
+        if (q < 5)  return "FAIR — acceptable but not exceptional";
+        if (q < 7)  return "GOOD — solid strategy";
         return              "EXCELLENT — production-ready";
+    }
+
+    /**
+     * Return on Risk: how much profit per unit of drawdown risk.
+     * Used only for display — not included in quality score.
+     */
+    public double getReturnOnRisk() {
+        if (maxDrawdown <= 0 || finalCapital <= 0) return 0;
+        return totalProfit / (finalCapital * (maxDrawdown / 100.0));
     }
 }

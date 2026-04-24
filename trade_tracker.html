@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal Engine</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #0d0f0e;
+  --bg2:      #141614;
+  --bg3:      #1c1f1c;
+  --bg4:      #232623;
+  --line:     rgba(255,255,255,0.06);
+  --line2:    rgba(255,255,255,0.12);
+  --text:     #e8ebe6;
+  --text2:    #8a9188;
+  --text3:    #545c52;
+  --green:    #4ade80;
+  --green-d:  #16a34a;
+  --green-bg: rgba(74,222,128,0.08);
+  --red:      #f87171;
+  --red-d:    #dc2626;
+  --red-bg:   rgba(248,113,113,0.08);
+  --amber:    #fbbf24;
+  --amber-bg: rgba(251,191,36,0.08);
+  --blue:     #60a5fa;
+  --blue-bg:  rgba(96,165,250,0.08);
+  --accent:   #4ade80;
+  --radius:   6px;
+  --radius-lg:10px;
+  --mono:     'DM Mono', monospace;
+  --sans:     'Syne', sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);font-size:13px;min-height:100vh}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:2px}
+
+/* ── Layout ── */
+.shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+.sidebar{background:var(--bg2);border-right:1px solid var(--line);padding:24px 0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.main{padding:28px 32px;overflow-y:auto}
+
+/* ── Sidebar ── */
+.logo{padding:0 20px 28px;border-bottom:1px solid var(--line);margin-bottom:20px}
+.logo-mark{font-family:var(--mono);font-size:10px;letter-spacing:.15em;color:var(--text3);text-transform:uppercase;margin-bottom:4px}
+.logo-name{font-size:16px;font-weight:600;color:var(--text);letter-spacing:-.02em}
+.logo-name span{color:var(--accent)}
+
+.nav-section{padding:0 12px;margin-bottom:6px}
+.nav-label{font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);padding:0 8px;margin-bottom:4px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius);cursor:pointer;color:var(--text2);font-size:13px;font-weight:500;transition:all .15s;border:none;background:none;width:100%;text-align:left}
+.nav-item:hover{background:var(--bg3);color:var(--text)}
+.nav-item.active{background:var(--green-bg);color:var(--green)}
+.nav-icon{width:16px;height:16px;opacity:.6;flex-shrink:0}
+.nav-item.active .nav-icon{opacity:1}
+.nav-badge{margin-left:auto;background:var(--bg4);color:var(--text3);font-family:var(--mono);font-size:10px;padding:2px 6px;border-radius:20px}
+.nav-item.active .nav-badge{background:var(--green-d);color:#fff}
+
+.sidebar-footer{margin-top:auto;padding:16px 12px 0;border-top:1px solid var(--line)}
+.api-status{display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg3);border-radius:var(--radius)}
+.status-dot{width:6px;height:6px;border-radius:50%;background:var(--text3);flex-shrink:0;transition:background .3s}
+.status-dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.err{background:var(--red)}
+.status-text{font-family:var(--mono);font-size:10px;color:var(--text2)}
+.base-url-input{font-family:var(--mono);font-size:10px;background:none;border:none;color:var(--text2);width:100%;outline:none;margin-top:6px;padding:0}
+
+/* ── Page header ── */
+.page-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px}
+.page-title{font-size:22px;font-weight:600;letter-spacing:-.03em;line-height:1.2}
+.page-sub{font-size:12px;color:var(--text2);margin-top:4px;font-family:var(--mono)}
+.header-actions{display:flex;gap:8px;align-items:center}
+
+/* ── Buttons ── */
+.btn{font-family:var(--sans);font-size:12px;font-weight:500;padding:8px 14px;border-radius:var(--radius);border:1px solid var(--line2);background:var(--bg3);color:var(--text);cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.btn:hover{background:var(--bg4);border-color:rgba(255,255,255,0.2)}
+.btn-primary{background:var(--green-bg);color:var(--green);border-color:rgba(74,222,128,0.3)}
+.btn-primary:hover{background:rgba(74,222,128,0.15)}
+.btn-danger{background:var(--red-bg);color:var(--red);border-color:rgba(248,113,113,0.3)}
+.btn-danger:hover{background:rgba(248,113,113,0.15)}
+.btn-ghost{background:none;border-color:transparent;color:var(--text2)}
+.btn-ghost:hover{background:var(--bg3);color:var(--text);border-color:var(--line2)}
+.btn-sm{padding:5px 10px;font-size:11px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+
+/* ── Cards ── */
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px 18px;margin-bottom:10px;transition:border-color .2s}
+.card:hover{border-color:var(--line2)}
+.card.c-green{border-left:2px solid var(--green);border-radius:0 var(--radius-lg) var(--radius-lg) 0}
+.card.c-blue{border-left:2px solid var(--blue);border-radius:0 var(--radius-lg) var(--radius-lg) 0}
+.card.c-gray{border-left:2px solid var(--bg4);border-radius:0 var(--radius-lg) var(--radius-lg) 0}
+.card.c-red{border-left:2px solid var(--red);border-radius:0 var(--radius-lg) var(--radius-lg) 0}
+
+/* ── Badges ── */
+.badge{font-family:var(--mono);font-size:10px;font-weight:500;padding:3px 8px;border-radius:20px;letter-spacing:.03em}
+.b-green{background:var(--green-bg);color:var(--green);border:1px solid rgba(74,222,128,0.2)}
+.b-blue{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(96,165,250,0.2)}
+.b-red{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,113,113,0.2)}
+.b-amber{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(251,191,36,0.2)}
+.b-gray{background:var(--bg3);color:var(--text2);border:1px solid var(--line)}
+
+/* ── Grid ── */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:10px 0}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:10px 0}
+.metric{background:var(--bg3);border-radius:var(--radius);padding:10px 12px}
+.mlabel{font-family:var(--mono);font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em}
+.mval{font-size:15px;font-weight:600;margin-top:4px;letter-spacing:-.02em}
+.mval.pos{color:var(--green)}.mval.neg{color:var(--red)}.mval.warn{color:var(--amber)}
+
+/* ── Row layout ── */
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.sym{font-size:16px;font-weight:600;letter-spacing:-.02em}
+.meta{font-family:var(--mono);font-size:11px;color:var(--text2);margin-top:3px}
+.divider{height:1px;background:var(--line);margin:12px 0}
+.text-muted{font-size:12px;color:var(--text2);line-height:1.6}
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+
+/* ── Progress bar ── */
+.pbar{height:3px;background:var(--bg4);border-radius:2px;margin-top:8px;overflow:hidden}
+.pfill{height:100%;border-radius:2px;transition:width .4s}
+
+/* ── Alert boxes ── */
+.alert{border-radius:var(--radius);padding:8px 12px;font-size:12px;margin-top:10px;font-family:var(--mono);display:flex;align-items:center;gap:8px}
+.alert-stop{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,113,113,0.2)}
+.alert-target{background:var(--green-bg);color:var(--green);border:1px solid rgba(74,222,128,0.2)}
+.alert-time{background:var(--amber-bg);color:var(--amber);border:1px solid rgba(251,191,36,0.2)}
+
+/* ── Table ── */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:8px 10px;color:var(--text3);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;font-weight:400}
+td{padding:10px 10px;border-bottom:1px solid var(--line);color:var(--text);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+
+/* ── Stats cards ── */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px}
+.stat-card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px}
+.stat-label{font-family:var(--mono);font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em}
+.stat-val{font-size:26px;font-weight:600;letter-spacing:-.04em;margin-top:6px}
+.stat-sub{font-family:var(--mono);font-size:10px;color:var(--text2);margin-top:4px}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:60px 20px;color:var(--text3)}
+.empty-icon{font-size:32px;margin-bottom:12px;opacity:.3}
+.empty-title{font-size:14px;font-weight:500;color:var(--text2);margin-bottom:6px}
+.empty-sub{font-size:12px;font-family:var(--mono)}
+
+/* ── Error bar ── */
+.error-bar{background:var(--red-bg);border:1px solid rgba(248,113,113,.2);color:var(--red);border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:12px;font-family:var(--mono);display:none}
+
+/* ── Modal ── */
+.modal-wrap{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:flex-start;justify-content:center;padding-top:80px;backdrop-filter:blur(4px)}
+.modal-wrap.open{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--line2);border-radius:var(--radius-lg);padding:24px;width:420px;max-width:94vw;max-height:80vh;overflow-y:auto}
+.modal-title{font-size:15px;font-weight:600;letter-spacing:-.02em;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.modal-foot{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+
+/* ── Form ── */
+.form-group{margin-bottom:14px}
+.form-row2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.form-label{font-family:var(--mono);font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:6px}
+input,select,textarea{width:100%;font-family:var(--mono);font-size:12px;padding:9px 11px;border-radius:var(--radius);border:1px solid var(--line2);background:var(--bg3);color:var(--text);outline:none;transition:border-color .15s}
+input:focus,select:focus,textarea:focus{border-color:rgba(74,222,128,0.4)}
+select option{background:var(--bg2)}
+.form-hint{font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:4px}
+
+/* ── Pipeline panel ── */
+.pipeline-box{background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius-lg);padding:20px;margin-bottom:20px}
+.pipeline-title{font-size:13px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.pipeline-row{display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:10px;align-items:end}
+.running-pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--amber);background:var(--amber-bg);border:1px solid rgba(251,191,36,.2);padding:6px 12px;border-radius:20px}
+.dot-spin{width:6px;height:6px;border-radius:50%;background:var(--amber);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+.log-box{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius);padding:12px;font-family:var(--mono);font-size:11px;color:var(--text2);max-height:140px;overflow-y:auto;margin-top:12px;line-height:1.7}
+.log-line.ok{color:var(--green)}.log-line.err{color:var(--red)}.log-line.info{color:var(--amber)}
+
+/* ── Confirm dialog ── */
+.confirm-wrap{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:2000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.confirm-wrap.open{display:flex}
+.confirm-box{background:var(--bg2);border:1px solid var(--line2);border-radius:var(--radius-lg);padding:24px;width:340px;max-width:94vw}
+.confirm-title{font-size:14px;font-weight:600;margin-bottom:8px}
+.confirm-body{font-size:12px;color:var(--text2);font-family:var(--mono);margin-bottom:20px;line-height:1.6}
+.confirm-foot{display:flex;gap:8px;justify-content:flex-end}
+
+/* ── Loading ── */
+.skeleton{background:linear-gradient(90deg,var(--bg3) 25%,var(--bg4) 50%,var(--bg3) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:var(--radius);height:80px;margin-bottom:10px}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">NSE Swing</div>
+      <div class="logo-name">Signal<span>Engine</span></div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-label">Pipeline</div>
+      <button class="nav-item active" onclick="showPage('pipeline',this)">
+        <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.2" d="M2 8h3M7 4h7M7 12h7M2 4v8"/><circle cx="4" cy="8" r="2" stroke="currentColor" stroke-width="1.2"/></svg>
+        Run Pipeline
+      </button>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-label">Trades</div>
+      <button class="nav-item" onclick="showPage('signals',this)">
+        <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.2" d="M8 2v4l3 3"/><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2"/></svg>
+        Signals
+        <span class="nav-badge" id="nb-signals">0</span>
+      </button>
+      <button class="nav-item" onclick="showPage('active',this)">
+        <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.2" d="M2 12l4-4 3 3 5-6"/></svg>
+        Active Trades
+        <span class="nav-badge" id="nb-active">0</span>
+      </button>
+      <button class="nav-item" onclick="showPage('history',this)">
+        <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.2"/><path stroke="currentColor" stroke-width="1.2" d="M5 8h6M5 5h4M5 11h3"/></svg>
+        History
+        <span class="nav-badge" id="nb-history">0</span>
+      </button>
+      <button class="nav-item" onclick="showPage('stats',this)">
+        <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.2" d="M2 13l3-4 3 2 3-5 3 2"/><rect x="2" y="2" width="12" height="11" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
+        Stats
+      </button>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="api-status">
+        <div class="status-dot" id="status-dot"></div>
+        <div>
+          <div class="status-text" id="status-text">Checking...</div>
+          <input class="base-url-input" id="base-url" value="http://localhost:8080" placeholder="http://localhost:8080" onchange="checkHealth()">
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Main content ── -->
+  <main class="main">
+    <div id="error-bar" class="error-bar"></div>
+
+    <!-- Pipeline page -->
+    <div id="page-pipeline" class="page">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Run Pipeline</div>
+          <div class="page-sub">Layer 1 → Layer 2 → auto-save signals</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="checkHealth()">↻ Ping API</button>
+      </div>
+
+      <div class="pipeline-box">
+        <div class="pipeline-title">
+          <svg width="14" height="14" fill="none" viewBox="0 0 16 16"><path stroke="var(--accent)" stroke-width="1.4" d="M2 4h12M2 8h8M2 12h5"/></svg>
+          Pipeline configuration
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+          <div>
+            <div class="form-label">Mode</div>
+            <select id="p-mode">
+              <option value="live">Live scan (current setups — fast)</option>
+              <option value="backtest">Backtest scan (historical — slow)</option>
+            </select>
+            <div class="form-hint" id="mode-hint">Fetches 3mo candles, checks current RSI/SMA state</div>
+          </div>
+          <div></div>
+        </div>
+        <div class="pipeline-row">
+          <div id="period-group">
+            <div class="form-label">Period</div>
+            <select id="p-period" onchange="">
+              <option value="1y">1 year</option>
+              <option value="2y">2 years</option>
+              <option value="3y">3 years</option>
+              <option value="5y" selected>5 years</option>
+            </select>
+          </div>
+          <div>
+            <div class="form-label">Top N stocks</div>
+            <select id="p-topn">
+              <option value="5">Top 5</option>
+              <option value="8" selected>Top 8</option>
+              <option value="10">Top 10</option>
+              <option value="15">Top 15</option>
+            </select>
+          </div>
+          <div>
+            <div class="form-label">Index</div>
+            <select id="p-index">
+              <option value="NIFTY 50" selected>Nifty 50</option>
+              <option value="NIFTY 100">Nifty 100</option>
+              <option value="NIFTY 200">Nifty 200</option>
+              <option value="NIFTY NEXT 50">Nifty Next 50</option>
+            </select>
+          </div>
+          <div>
+            <div class="form-label">Exchange</div>
+            <select id="p-exchange">
+              <option value="NS" selected>NSE</option>
+              <option value="BO">BSE</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" id="run-btn" onclick="runPipeline()">
+            ▶ Run
+          </button>
+        </div>
+        <script>
+          document.getElementById('p-mode').addEventListener('change', function() {
+            const hints = {
+              live: 'Fetches 3mo candles, checks current RSI/SMA/ATR state — ~2 min',
+              backtest: 'Runs full backtest on 5y data to rank by historical return — ~20 min'
+            };
+            document.getElementById('mode-hint').textContent = hints[this.value] || '';
+            document.getElementById('period-group').style.opacity = this.value === 'live' ? '0.4' : '1';
+            document.getElementById('period-group').style.pointerEvents = this.value === 'live' ? 'none' : 'auto';
+          });
+        </script>
+        <div style="display:none">
+        </div>
+        <div id="pipeline-status" style="display:none;margin-top:12px">
+          <div class="running-pill"><div class="dot-spin"></div><span id="pipeline-status-text">Running pipeline...</span></div>
+        </div>
+        <div id="pipeline-log" class="log-box" style="display:none"></div>
+      </div>
+
+      <div id="pipeline-results"></div>
+    </div>
+
+    <!-- Signals page -->
+    <div id="page-signals" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Signals</div>
+          <div class="page-sub" id="sig-sub">Stocks that passed Layer 2 — waiting for entry</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-ghost btn-sm" onclick="refresh()">↻ Refresh</button>
+          <button class="btn btn-primary btn-sm" onclick="openAddModal()">+ Add manual</button>
+        </div>
+      </div>
+      <div id="signals-list"></div>
+    </div>
+
+    <!-- Active page -->
+    <div id="page-active" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Active Trades</div>
+          <div class="page-sub" id="act-sub">Open positions — live P&L tracking</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="refresh()">↻ Refresh</button>
+      </div>
+      <div id="active-list"></div>
+    </div>
+
+    <!-- History page -->
+    <div id="page-history" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Trade History</div>
+          <div class="page-sub" id="hist-sub">All closed trades</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-ghost btn-sm" onclick="refresh()">↻ Refresh</button>
+          <button class="btn btn-danger btn-sm" onclick="confirmClearHistory()">🗑 Clear history</button>
+        </div>
+      </div>
+      <div id="history-list"></div>
+    </div>
+
+    <!-- Stats page -->
+    <div id="page-stats" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Statistics</div>
+          <div class="page-sub">Performance across all closed trades</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="loadStats()">↻ Refresh</button>
+      </div>
+      <div id="stats-content"></div>
+    </div>
+  </main>
+</div>
+
+<!-- ── Modal ── -->
+<div class="modal-wrap" id="modal">
+  <div class="modal">
+    <div class="modal-title" id="modal-title"></div>
+    <div id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<!-- ── Confirm dialog ── -->
+<div class="confirm-wrap" id="confirm-dialog">
+  <div class="confirm-box">
+    <div class="confirm-title" id="confirm-title">Are you sure?</div>
+    <div class="confirm-body" id="confirm-body"></div>
+    <div class="confirm-foot">
+      <button class="btn btn-ghost" onclick="closeConfirm()">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+let allTrades   = [];
+let pipelineLog = [];
+
+// ── API base ──────────────────────────────────────────────────────────────────
+const BASE  = () => (document.getElementById('base-url').value || 'http://localhost:8080').replace(/\/$/, '');
+const TRADES = () => `${BASE()}/api/v1/trades`;
+
+async function api(path, method = 'GET', body = null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(TRADES() + path, opts);
+  if (!r.ok) { const t = await r.text(); throw new Error(t || r.statusText); }
+  return r.json();
+}
+
+async function apiBacktest(path) {
+  let r;
+  try {
+    r = await fetch(`${BASE()}/api/v1/backtest${path}`);
+  } catch (e) {
+    throw new Error(`Cannot reach ${BASE()} — is Spring Boot running? (${e.message})`);
+  }
+  if (!r.ok) { const t = await r.text(); throw new Error(`HTTP ${r.status}: ${t || r.statusText}`); }
+  return r.json();
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
+async function checkHealth() {
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  try {
+    await fetch(`${BASE()}/api/v1/trades`, { signal: AbortSignal.timeout(3000) });
+    dot.className  = 'status-dot ok';
+    text.textContent = 'API connected';
+  } catch {
+    dot.className  = 'status-dot err';
+    text.textContent = 'API offline';
+  }
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function showPage(name, btn) {
+  document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + name).style.display = 'block';
+  btn.classList.add('active');
+  if (name === 'signals' || name === 'active' || name === 'history') refresh();
+  if (name === 'stats') loadStats();
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+async function refresh() {
+  try {
+    allTrades = await api('');
+    const sigs  = allTrades.filter(t => t.status === 'SIGNAL');
+    const acts  = allTrades.filter(t => t.status === 'ACTIVE');
+    const hist  = allTrades.filter(t => t.status === 'CLOSED');
+
+    document.getElementById('nb-signals').textContent  = sigs.length  || '0';
+    document.getElementById('nb-active').textContent   = acts.length  || '0';
+    document.getElementById('nb-history').textContent  = hist.length  || '0';
+    document.getElementById('sig-sub').textContent     = `${sigs.length} signal${sigs.length !== 1 ? 's' : ''} waiting for entry`;
+    document.getElementById('act-sub').textContent     = `${acts.length} open position${acts.length !== 1 ? 's' : ''}`;
+    document.getElementById('hist-sub').textContent    = `${hist.length} closed trade${hist.length !== 1 ? 's' : ''}`;
+
+    renderSignals(sigs);
+    renderActive(acts);
+    renderHistory(hist);
+    hideError();
+  } catch (e) {
+    showError('Could not connect to backend: ' + e.message);
+  }
+}
+
+// ── Render Signals ─────────────────────────────────────────────────────────────
+function renderSignals(sigs) {
+  const el = document.getElementById('signals-list');
+  if (!sigs.length) {
+    el.innerHTML = empty('No signals yet', 'Run the pipeline or add one manually');
+    return;
+  }
+  el.innerHTML = sigs.map(t => {
+    const days  = daysSince(t.createdAt);
+    const fresh = days <= 2;
+    return `<div class="card c-green">
+      <div class="row">
+        <div>
+          <div class="row" style="gap:8px;align-items:center">
+            <span class="sym">${t.symbol}</span>
+            <span class="badge b-green">SIGNAL</span>
+            ${fresh ? '<span class="badge b-amber">fresh</span>' : ''}
+            ${t.swingVerdict ? `<span class="badge ${t.swingVerdict==='STRONG_BUY'||t.swingVerdict==='BUY'?'b-green':'b-amber'}">verdict: ${t.swingVerdict}</span>` : ''}
+            ${t.conviction ? `<span class="badge ${t.conviction==='HIGH'?'b-green':t.conviction==='MEDIUM'?'b-amber':'b-gray'}">conviction: ${t.conviction}</span>` : ''}
+          </div>
+          <div class="meta">${t.companyName || t.symbol} · added ${days === 0 ? 'today' : days + 'd ago'} · score ${t.compositeScore || '—'}/100</div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary btn-sm" onclick="openEnterModal('${t.id}')">Enter trade</button>
+          <button class="btn btn-ghost btn-sm" data-refine="${t.id}" onclick="refineSignal('${t.id}','${t.symbol}','${t.sector||'OTHER'}')">⚡ Refine</button>
+          <button class="btn btn-ghost btn-sm" onclick="confirmRemove('${t.id}','${t.symbol}')">Remove</button>
+        </div>
+      </div>
+      <div class="grid3">
+        <div class="metric"><div class="mlabel">Entry zone</div><div class="mval" style="font-size:13px">₹${fmt(t.entryLow)} – ₹${fmt(t.entryHigh)}</div></div>
+        <div class="metric"><div class="mlabel">Stop loss</div><div class="mval neg">₹${fmt(t.stopLoss)}</div></div>
+        <div class="metric"><div class="mlabel">Target</div><div class="mval pos">₹${fmt(t.target)}</div></div>
+      </div>
+      ${t.rationale ? `<div class="divider"></div><div class="text-muted">${t.rationale}</div>` : ''}
+      ${t.entryNote ? `<div class="text-muted" style="margin-top:6px;color:var(--blue)">↳ ${t.entryNote}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ── Render Active ──────────────────────────────────────────────────────────────
+function renderActive(acts) {
+  const el = document.getElementById('active-list');
+  if (!acts.length) {
+    el.innerHTML = empty('No active trades', 'Enter a signal to start tracking P&L');
+    return;
+  }
+  el.innerHTML = acts.map(t => {
+    const held   = t.daysHeld || 0;
+    const max    = t.maxHoldDays || 20;
+    const remain = t.daysRemaining || 0;
+    const pct    = Math.min(100, (held / max) * 100);
+    const cmp    = t.currentPrice || t.entryPrice || 0;
+    const plPct  = t.pnlPct != null ? t.pnlPct.toFixed(2) : null;
+    const plAbs  = t.pnlAbs != null ? Math.round(t.pnlAbs) : null;
+    const pClass = t.pnlPct >= 0 ? 'pos' : 'neg';
+    const barCol = pct > 80 ? 'var(--amber)' : 'var(--green)';
+
+    let alert = '';
+    if (t.exitAlert === 'STOP_HIT')
+      alert = `<div class="alert alert-stop">⚠ Stop loss breached — ₹${fmt(t.stopLoss)} hit. Exit now.</div>`;
+    else if (t.exitAlert === 'TARGET_HIT')
+      alert = `<div class="alert alert-target">✓ Target reached — ₹${fmt(t.target)} hit. Book profits.</div>`;
+    else if (t.exitAlert === 'TIME_LIMIT')
+      alert = `<div class="alert alert-time">⏱ Max hold (${max}d) reached. Time-based exit triggered.</div>`;
+    else if (t.exitAlert === 'TIME_WARNING')
+      alert = `<div class="alert alert-time">⏱ ${remain} day${remain !== 1 ? 's' : ''} left in holding window.</div>`;
+
+    return `<div class="card c-blue">
+      <div class="row">
+        <div>
+          <div class="row" style="gap:8px;align-items:center">
+            <span class="sym">${t.symbol}</span>
+            <span class="badge b-blue">ACTIVE</span>
+          </div>
+          <div class="meta">${t.companyName || t.symbol} · day ${held} of ${max} · ${remain > 0 ? remain + 'd remaining' : 'time limit reached'}</div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-ghost btn-sm" onclick="openUpdatePriceModal('${t.id}','${cmp}')">Update price</button>
+          <button class="btn btn-danger btn-sm" onclick="openExitModal('${t.id}','${cmp}')">Exit</button>
+        </div>
+      </div>
+      <div style="margin:10px 0 4px">
+        <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--text3)">
+          <span>Holding period</span><span>${pct.toFixed(0)}%</span>
+        </div>
+        <div class="pbar"><div class="pfill" style="width:${pct}%;background:${barCol}"></div></div>
+      </div>
+      <div class="grid4">
+        <div class="metric"><div class="mlabel">Entry</div><div class="mval" style="font-size:14px">₹${fmt(t.entryPrice)}</div></div>
+        <div class="metric"><div class="mlabel">Current</div><div class="mval" style="font-size:14px">₹${fmt(cmp)}</div></div>
+        <div class="metric"><div class="mlabel">P&L %</div><div class="mval ${pClass}">${plPct !== null ? (t.pnlPct >= 0 ? '+' : '') + plPct + '%' : '—'}</div></div>
+        <div class="metric"><div class="mlabel">P&L ₹</div><div class="mval ${pClass}">${plAbs !== null ? (t.pnlAbs >= 0 ? '+' : '') + '₹' + Math.abs(plAbs) : '—'}</div></div>
+      </div>
+      <div class="grid3">
+        <div class="metric"><div class="mlabel">Stop</div><div class="mval neg" style="font-size:13px">₹${fmt(t.stopLoss)}</div></div>
+        <div class="metric"><div class="mlabel">Target</div><div class="mval pos" style="font-size:13px">₹${fmt(t.target)}</div></div>
+        <div class="metric"><div class="mlabel">Qty</div><div class="mval" style="font-size:14px">${t.quantity || '—'}</div></div>
+      </div>
+      ${alert}
+    </div>`;
+  }).join('');
+}
+
+// ── Render History ─────────────────────────────────────────────────────────────
+function renderHistory(hist) {
+  const el = document.getElementById('history-list');
+  if (!hist.length) {
+    el.innerHTML = empty('No closed trades', 'Exited trades will appear here');
+    return;
+  }
+  const rows = [...hist].reverse().map(t => {
+    const pl    = t.entryPrice && t.exitPrice
+                  ? ((t.exitPrice - t.entryPrice) / t.entryPrice * 100).toFixed(2)
+                  : null;
+    const plAbs = t.entryPrice && t.exitPrice && t.quantity
+                  ? Math.round((t.exitPrice - t.entryPrice) * t.quantity) : null;
+    const won   = pl !== null && parseFloat(pl) >= 0;
+    return `<tr>
+      <td><strong>${t.symbol}</strong><br><span style="color:var(--text3);font-size:11px;font-family:var(--mono)">${t.companyName || ''}</span></td>
+      <td><span style="font-family:var(--mono)">₹${fmt(t.entryPrice)}</span></td>
+      <td><span style="font-family:var(--mono)">₹${fmt(t.exitPrice)}</span></td>
+      <td style="color:${won ? 'var(--green)' : 'var(--red)'}"><span style="font-family:var(--mono)">${pl !== null ? (won ? '+' : '') + pl + '%' : '—'}</span></td>
+      <td style="color:${won ? 'var(--green)' : 'var(--red)'}"><span style="font-family:var(--mono)">${plAbs !== null ? (won ? '+' : '') + '₹' + Math.abs(plAbs) : '—'}</span></td>
+      <td><span style="font-family:var(--mono);color:var(--text2)">${t.daysHeld || '—'}d</span></td>
+      <td><span class="badge ${won ? 'b-green' : 'b-red'}">${t.exitReason || 'MANUAL'}</span></td>
+      <td>
+        <button class="btn btn-ghost btn-sm" onclick="confirmDeleteClosed('${t.id}','${t.symbol}')">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `<div class="card" style="padding:0">
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Stock</th><th>Entry</th><th>Exit</th><th>P&L %</th><th>P&L ₹</th><th>Days</th><th>Reason</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+// ── Render Stats ───────────────────────────────────────────────────────────────
+async function loadStats() {
+  const el = document.getElementById('stats-content');
+  el.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+  try {
+    const s = await api('/stats');
+    if (s.message) {
+      el.innerHTML = empty('No data yet', 'Stats appear after your first closed trade');
+      return;
+    }
+    el.innerHTML = `
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Total trades</div>
+          <div class="stat-val">${s.totalTrades}</div>
+          <div class="stat-sub">${s.wins} wins · ${s.losses} losses</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Win rate</div>
+          <div class="stat-val" style="color:${s.winRate >= 50 ? 'var(--green)' : 'var(--red)'}">${s.winRate}%</div>
+          <div class="stat-sub">above 50% is profitable</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Profit factor</div>
+          <div class="stat-val" style="color:${s.profitFactor >= 1 ? 'var(--green)' : 'var(--red)'}">${s.profitFactor}x</div>
+          <div class="stat-sub">above 1.0 = edge exists</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Total P&L</div>
+          <div class="stat-val" style="color:${s.totalPnlRs >= 0 ? 'var(--green)' : 'var(--red)'}">${s.totalPnlRs >= 0 ? '+' : ''}₹${s.totalPnlRs}</div>
+          <div class="stat-sub">across all closed trades</div>
+        </div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Avg win</div>
+          <div class="stat-val pos">+${s.avgWinPct}%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg loss</div>
+          <div class="stat-val neg">−${s.avgLossPct}%</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Avg hold</div>
+          <div class="stat-val">${s.avgHoldDays}d</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Win / Loss ratio</div>
+          <div class="stat-val">${s.avgLossPct > 0 ? (s.avgWinPct / s.avgLossPct).toFixed(2) : '—'}x</div>
+          <div class="stat-sub">reward per unit of risk</div>
+        </div>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="error-bar" style="display:block">Could not load stats: ${e.message}</div>`;
+  }
+}
+
+// ── Pipeline ───────────────────────────────────────────────────────────────────
+async function runPipeline() {
+  const btn    = document.getElementById('run-btn');
+  const status = document.getElementById('pipeline-status');
+  const logBox = document.getElementById('pipeline-log');
+  const stText = document.getElementById('pipeline-status-text');
+  const resBox = document.getElementById('pipeline-results');
+
+  btn.disabled = true;
+  pipelineLog  = [];
+  status.style.display = 'block';
+  logBox.style.display = 'block';
+  resBox.innerHTML     = '';
+  logBox.innerHTML     = '';
+
+  const period   = document.getElementById('p-period').value;
+  const topN     = document.getElementById('p-topn').value;
+  const exchange = document.getElementById('p-exchange').value;
+  const index    = document.getElementById('p-index').value;
+
+  function log(msg, cls = '') {
+    pipelineLog.push({ msg, cls });
+    const line = document.createElement('div');
+    line.className = 'log-line ' + cls;
+    line.textContent = '› ' + msg;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  try {
+    log(`Starting pipeline — index=${index}, period=${period}, topN=${topN}, exchange=${exchange}`);
+    stText.textContent = 'Running Layer 1 + Layer 2...';
+
+    const mode = document.getElementById('p-mode').value;
+    let pipeline;
+    if (mode === 'live') {
+      stText.textContent = 'Running live indicator scan...';
+      log(`Live scan mode — checking current RSI/SMA/ATR state (3mo data)`);
+      const liveResult = await fetch(`${BASE()}/api/v1/live/pipeline?index=${encodeURIComponent(index)}&topN=${topN}&exchange=${exchange}`);
+      if (!liveResult.ok) throw new Error(`HTTP ${liveResult.status}: ${await liveResult.text()}`);
+      pipeline = await liveResult.json();
+      // Normalise live pipeline response to match backtest pipeline format
+      if (!pipeline.layer2) pipeline.layer2 = { results: [], passed: 0 };
+      if (!pipeline.layer1_shortlist) {
+        pipeline.layer1_shortlist = (pipeline.layer1_setups || []).map(s => s.symbol);
+      }
+    } else {
+      stText.textContent = 'Running Layer 1 + Layer 2...';
+      pipeline = await apiBacktest(`/pipeline/run?period=${period}&topN=${topN}&exchange=${exchange}&index=${encodeURIComponent(index)}`);
+    }
+    log(`Layer 1 shortlist: ${(pipeline.layer1_shortlist || []).join(', ')}`, 'info');
+
+    const l2 = pipeline.layer2 || {};
+    const passed   = (l2.results || []).filter(r => r.layer2_pass);
+    const rejected = (l2.results || []).filter(r => !r.layer2_pass);
+
+    passed.forEach(r   => log(`✓ PASS   ${r.symbol} (score ${r.composite_score}) — ${r.swing_verdict}`, 'ok'));
+    rejected.forEach(r => log(`✗ REJECT ${r.symbol} (score ${r.composite_score}) — ${r.swing_verdict}`));
+
+    if (!passed.length) {
+      log('No stocks passed Layer 2 — no signals saved', 'err');
+      status.style.display = 'none';
+      btn.disabled = false;
+      return;
+    }
+
+    stText.textContent = 'Saving signals to trade tracker...';
+    log(`Saving ${passed.length} passing stock${passed.length > 1 ? 's' : ''} as signals...`);
+
+    const saveResult = await api('/pipeline', 'POST', pipeline);
+    (saveResult.saved   || []).forEach(s => log(`  Saved: ${s}`, 'ok'));
+    (saveResult.skipped || []).forEach(s => log(`  Skipped: ${s}`));
+    (saveResult.errors  || []).forEach(s => log(`  Error: ${s}`, 'err'));
+
+    log(`Done — ${saveResult.saved?.length || 0} signal(s) saved`, 'ok');
+    status.style.display = 'none';
+
+    // Render inline results
+    resBox.innerHTML = renderPipelineResults(l2.results || [], pipeline.layer1_shortlist || []);
+    await refresh();
+
+  } catch (e) {
+    log('Pipeline failed: ' + e.message, 'err');
+    status.style.display = 'none';
+  }
+
+  btn.disabled = false;
+}
+
+function renderPipelineResults(results, shortlist) {
+  if (!results.length) return '';
+  const passed   = results.filter(r => r.layer2_pass);
+  const rejected = results.filter(r => !r.layer2_pass);
+
+  const card = (r) => {
+    const pass = r.layer2_pass;
+    const cls  = pass ? 'c-green' : 'c-gray';
+    const b    = pass ? 'b-green' : 'b-red';
+    return `<div class="card ${cls}">
+      <div class="row">
+        <div>
+          <div class="row" style="gap:8px;align-items:center">
+            <span class="sym">${r.symbol}</span>
+            <span class="badge ${b}">${pass ? '✓ L2 PASS' : '✗ L2 REJECT'}</span>
+            <span class="badge b-gray">verdict: ${r.swing_verdict}</span>
+            <span class="badge b-gray">conviction: ${r.conviction}</span>
+          </div>
+          <div class="meta">${r.company_name} · score ${r.composite_score}/100</div>
+        </div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text2);text-align:right">
+          ${r.fundamentals?.roe ? 'ROE ' + r.fundamentals.roe + '%' : ''}
+          ${r.fundamentals?.debt_equity ? ' · D/E ' + r.fundamentals.debt_equity + 'x' : ''}
+        </div>
+      </div>
+      ${r.rationale ? `<div class="text-muted" style="margin-top:10px">${r.rationale}</div>` : ''}
+      ${(r.red_flags || []).length ? `<div style="margin-top:8px;font-family:var(--mono);font-size:10px;color:var(--red)">⚑ ${r.red_flags.join(' · ')}</div>` : ''}
+    </div>`;
+  };
+
+  return `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px">
+      <div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">
+          ✓ Passed (${passed.length})
+        </div>
+        ${passed.map(card).join('') || '<div class="text-muted">None passed</div>'}
+      </div>
+      <div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">
+          ✗ Rejected (${rejected.length})
+        </div>
+        ${rejected.map(card).join('')}
+      </div>
+    </div>`;
+}
+
+// ── Modals ─────────────────────────────────────────────────────────────────────
+function openAddModal() {
+  setModal('Add signal manually', `
+    <div class="form-row2">
+      <div><label class="form-label">NSE Symbol</label><input id="f-sym" placeholder="HDFCBANK" style="text-transform:uppercase"></div>
+      <div><label class="form-label">Company name</label><input id="f-co" placeholder="HDFC Bank"></div>
+    </div>
+    <div class="form-row2">
+      <div><label class="form-label">Entry low ₹</label><input id="f-el" type="number" placeholder="1800"></div>
+      <div><label class="form-label">Entry high ₹</label><input id="f-eh" type="number" placeholder="1850"></div>
+    </div>
+    <div class="form-row2">
+      <div><label class="form-label">Stop loss ₹</label><input id="f-sl" type="number" placeholder="1740"></div>
+      <div><label class="form-label">Target ₹</label><input id="f-tg" type="number" placeholder="1960"></div>
+    </div>
+    <div class="form-row2">
+      <div><label class="form-label">Layer 2 score</label><input id="f-sc" type="number" placeholder="72"></div>
+      <div><label class="form-label">Max hold days</label><input id="f-md" type="number" value="20"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Rationale</label><input id="f-rt" placeholder="Q4 earnings beat, bullish sentiment..."></div>`,
+    `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+     <button class="btn btn-primary" onclick="addSignal()">Add signal</button>`);
+}
+
+async function refineSignal(id, symbol, sector) {
+  const btn = document.querySelector(`[data-refine="${id}"]`);
+  if (btn) { btn.textContent = '⏳ Refining...'; btn.disabled = true; }
+  try {
+    const r = await fetch(`${BASE()}/api/v1/layer3/refine-and-save?symbol=${symbol}&sector=${encodeURIComponent(sector||'OTHER')}`, {method:'POST'});
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    if (data.status === 'error') {
+      showError(`Layer 3 failed for ${symbol}: ${data.message}`);
+    } else {
+      refresh();
+    }
+  } catch(e) {
+    showError('Layer 3 error: ' + e.message);
+  } finally {
+    if (btn) { btn.textContent = '⚡ Refine'; btn.disabled = false; }
+  }
+}
+
+async function addSignal() {
+  const sym = document.getElementById('f-sym').value.trim().toUpperCase();
+  if (!sym) return alert('Symbol is required');
+  try {
+    await api('', 'POST', {
+      symbol:         sym,
+      companyName:    document.getElementById('f-co').value.trim() || sym,
+      entryLow:       +document.getElementById('f-el').value || 0,
+      entryHigh:      +document.getElementById('f-eh').value || 0,
+      stopLoss:       +document.getElementById('f-sl').value || 0,
+      target:         +document.getElementById('f-tg').value || 0,
+      compositeScore: +document.getElementById('f-sc').value || 0,
+      maxHoldDays:    +document.getElementById('f-md').value || 20,
+      rationale:      document.getElementById('f-rt').value.trim(),
+    });
+    closeModal(); refresh();
+  } catch (e) { showError(e.message); }
+}
+
+function openEnterModal(id) {
+  const t   = allTrades.find(x => x.id === id);
+  const mid = t.entryLow && t.entryHigh ? ((+t.entryLow + +t.entryHigh) / 2).toFixed(0) : '';
+  setModal(`Enter trade — ${t.symbol}`, `
+    <div class="form-row2">
+      <div><label class="form-label">Entry price ₹</label><input id="e-ep" type="number" placeholder="${mid}"></div>
+      <div><label class="form-label">Quantity (shares)</label><input id="e-qty" type="number" placeholder="10"></div>
+    </div>
+    <div class="form-row2">
+      <div><label class="form-label">Stop loss ₹</label><input id="e-sl" type="number" value="${t.stopLoss || ''}"></div>
+      <div><label class="form-label">Target ₹</label><input id="e-tg" type="number" value="${t.target || ''}"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Entry date</label><input id="e-dt" type="date" value="${today()}"></div>
+    <div class="form-hint">Entry zone: ₹${fmt(t.entryLow)} – ₹${fmt(t.entryHigh)}</div>`,
+    `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+     <button class="btn btn-primary" onclick="enterTrade('${id}')">Confirm entry</button>`);
+}
+
+async function enterTrade(id) {
+  const ep  = +document.getElementById('e-ep').value;
+  const qty = +document.getElementById('e-qty').value;
+  if (!ep || !qty) return alert('Entry price and quantity are required');
+  try {
+    await api(`/${id}/enter`, 'PATCH', {
+      entryPrice: ep, quantity: qty,
+      stopLoss:   +document.getElementById('e-sl').value,
+      target:     +document.getElementById('e-tg').value,
+      entryDate:  document.getElementById('e-dt').value,
+    });
+    closeModal();
+    showPage('active', document.querySelectorAll('.nav-item')[2]);
+  } catch (e) { showError(e.message); }
+}
+
+function openUpdatePriceModal(id, cmp) {
+  const t = allTrades.find(x => x.id === id);
+  setModal(`Update price — ${t.symbol}`, `
+    <div class="form-group">
+      <label class="form-label">Current market price ₹</label>
+      <input id="u-cp" type="number" placeholder="${cmp}">
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+      <div style="background:var(--bg3);border-radius:var(--radius);padding:8px 10px">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3)">Entry</div>
+        <div style="font-family:var(--mono);font-size:13px;margin-top:2px">₹${fmt(t.entryPrice)}</div>
+      </div>
+      <div style="background:var(--red-bg);border-radius:var(--radius);padding:8px 10px">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3)">Stop</div>
+        <div style="font-family:var(--mono);font-size:13px;color:var(--red);margin-top:2px">₹${fmt(t.stopLoss)}</div>
+      </div>
+      <div style="background:var(--green-bg);border-radius:var(--radius);padding:8px 10px">
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3)">Target</div>
+        <div style="font-family:var(--mono);font-size:13px;color:var(--green);margin-top:2px">₹${fmt(t.target)}</div>
+      </div>
+    </div>`,
+    `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+     <button class="btn btn-primary" onclick="updatePrice('${id}')">Update</button>`);
+}
+
+async function updatePrice(id) {
+  const cp = +document.getElementById('u-cp').value;
+  if (!cp) return alert('Enter current price');
+  try {
+    await api(`/${id}/price`, 'PATCH', { currentPrice: cp });
+    closeModal(); refresh();
+  } catch (e) { showError(e.message); }
+}
+
+function openExitModal(id, cmp) {
+  const t = allTrades.find(x => x.id === id);
+  setModal(`Exit trade — ${t.symbol}`, `
+    <div class="form-row2">
+      <div><label class="form-label">Exit price ₹</label><input id="x-ep" type="number" placeholder="${cmp}"></div>
+      <div><label class="form-label">Exit date</label><input id="x-dt" type="date" value="${today()}"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Exit reason</label>
+      <select id="x-rs">
+        <option value="TARGET_HIT">Target hit</option>
+        <option value="STOP_HIT">Stop hit</option>
+        <option value="TIME_LIMIT">Time limit</option>
+        <option value="MANUAL">Manual exit</option>
+        <option value="TRAIL_STOP">Trail stop</option>
+      </select>
+    </div>`,
+    `<button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+     <button class="btn btn-danger" onclick="exitTrade('${id}')">Confirm exit</button>`);
+}
+
+async function exitTrade(id) {
+  const xp = +document.getElementById('x-ep').value;
+  if (!xp) return alert('Exit price is required');
+  try {
+    await api(`/${id}/exit`, 'PATCH', {
+      exitPrice:  xp,
+      exitDate:   document.getElementById('x-dt').value,
+      exitReason: document.getElementById('x-rs').value,
+    });
+    closeModal();
+    showPage('history', document.querySelectorAll('.nav-item')[3]);
+  } catch (e) { showError(e.message); }
+}
+
+// ── Remove / delete ────────────────────────────────────────────────────────────
+function confirmRemove(id, symbol) {
+  showConfirm(
+    `Remove signal — ${symbol}`,
+    `This will delete the ${symbol} signal permanently. It can be re-added by running the pipeline again.`,
+    async () => {
+      try { await api('/' + id, 'DELETE'); refresh(); }
+      catch (e) { showError(e.message); }
+    }
+  );
+}
+
+function confirmDeleteClosed(id, symbol) {
+  showConfirm(
+    `Delete trade record — ${symbol}`,
+    `This removes this closed trade from history. Stats will be recalculated.`,
+    async () => {
+      try { await api('/' + id, 'DELETE'); refresh(); }
+      catch (e) { showError(e.message); }
+    }
+  );
+}
+
+function confirmClearHistory() {
+  const closed = allTrades.filter(t => t.status === 'CLOSED');
+  if (!closed.length) { showError('No history to clear'); return; }
+  showConfirm(
+    'Clear all history',
+    `This will permanently delete all ${closed.length} closed trade record${closed.length > 1 ? 's' : ''}. This cannot be undone.`,
+    async () => {
+      try {
+        await Promise.all(closed.map(t => api('/' + t.id, 'DELETE')));
+        refresh();
+      } catch (e) { showError(e.message); }
+    }
+  );
+}
+
+// ── Modal helpers ──────────────────────────────────────────────────────────────
+function setModal(title, body, foot) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML    = body;
+  document.getElementById('modal-foot').innerHTML    = foot;
+  document.getElementById('modal').classList.add('open');
+}
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+// ── Confirm helpers ────────────────────────────────────────────────────────────
+function showConfirm(title, body, onOk) {
+  document.getElementById('confirm-title').textContent = title;
+  document.getElementById('confirm-body').textContent  = body;
+  const btn = document.getElementById('confirm-ok');
+  btn.onclick = () => { closeConfirm(); onOk(); };
+  document.getElementById('confirm-dialog').classList.add('open');
+}
+function closeConfirm() { document.getElementById('confirm-dialog').classList.remove('open'); }
+
+// ── Utility ────────────────────────────────────────────────────────────────────
+const fmt     = v => v != null && v !== 0 ? parseFloat(v).toFixed(2) : '—';
+const today   = () => new Date().toISOString().slice(0, 10);
+const daysSince = iso => iso ? Math.floor((Date.now() - new Date(iso)) / 86400000) : 0;
+
+function empty(title, sub) {
+  return `<div class="empty">
+    <div class="empty-icon">◦</div>
+    <div class="empty-title">${title}</div>
+    <div class="empty-sub">${sub}</div>
+  </div>`;
+}
+function showError(msg) {
+  const el = document.getElementById('error-bar');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 6000);
+}
+function hideError() { document.getElementById('error-bar').style.display = 'none'; }
+
+// ── Close on backdrop ──────────────────────────────────────────────────────────
+document.getElementById('modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('modal')) closeModal();
+});
+document.getElementById('confirm-dialog').addEventListener('click', e => {
+  if (e.target === document.getElementById('confirm-dialog')) closeConfirm();
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────────────
+checkHealth();
+refresh();
+setInterval(refresh, 60000);
+setInterval(checkHealth, 30000);
+</script>
+</body>
+</html>

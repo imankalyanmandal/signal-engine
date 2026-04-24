@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 
@@ -22,64 +23,60 @@ public class Nifty50ScannerService {
     private final BacktestService  backtestService;
 
     /**
-     * Runs the backtest strategy across all Nifty 50 stocks
-     * and returns results ranked by returnPercent (highest first).
+     * Scan any NSE index and return backtest results ranked by return%.
      *
      * @param period   Data period: 1mo | 3mo | 6mo | 1y | 2y | 5y
      * @param exchange NS or BO
-     * @param topN     If > 0, returns only the top N results. 0 = return all 50.
+     * @param topN     If > 0, return only the top N. 0 = return all.
+     * @param index    Index name: "NIFTY 50" | "NIFTY 100" | "NIFTY 200" | "NIFTY NEXT 50"
      */
-    public List<Nifty50ScanResult> scanAll(String period, String exchange, int topN) {
+    public List<Nifty50ScanResult> scanAll(String period, String exchange, int topN, String index) {
 
-        // 1. Get symbol list from Python service
-        List<String> symbols = marketDataClient.fetchNifty50Symbols();
-        log.info("Starting Nifty 50 scan: {} symbols, period={}", symbols.size(), period);
+        // Fetch constituents for the requested index
+        List<String> symbols = marketDataClient.fetchNifty50Symbols(index);
+        log.info("Starting scan: index={} ({} symbols) period={}", index, symbols.size(), period);
 
-        List<Nifty50ScanResult> results = new ArrayList<>();
-        AtomicInteger done = new AtomicInteger(0);
+        List<Nifty50ScanResult> results    = new ArrayList<>();
+        AtomicInteger           done       = new AtomicInteger(0);
 
-        // 2. Loop every symbol — sequential to respect Yahoo Finance rate limits
         for (String symbol : symbols) {
-            int current = done.incrementAndGet();
-            log.info("[{}/{}] Processing {}", current, symbols.size(), symbol);
-
-            Nifty50ScanResult result = runSingleStock(symbol, period, exchange);
-            results.add(result);
-
-            // Small delay to avoid hammering Yahoo Finance
+            log.info("[{}/{}] {}", done.incrementAndGet(), symbols.size(), symbol);
+            results.add(runSingleStock(symbol, period, exchange));
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         }
 
-        // 3. Sort: profitable stocks first (by returnPercent desc),
-        //    then failed stocks at the bottom (by errorMessage)
+        // Sort: profitable first, errors last
         results.sort(Comparator
                 .<Nifty50ScanResult>comparingInt(r -> r.isError() ? 1 : 0)
                 .thenComparingDouble(r -> -r.getReturnPercent()));
 
-        // 4. Assign ranks (errors get rank 0)
+        // Assign ranks
         int rank = 1;
         for (Nifty50ScanResult r : results) {
             r.setRank(r.isError() ? 0 : rank++);
         }
 
-        log.info("Scan complete. {} succeeded, {} failed.",
+        log.info("Scan complete — {} ok, {} failed",
                 results.stream().filter(r -> !r.isError()).count(),
                 results.stream().filter(Nifty50ScanResult::isError).count());
 
-        // 5. Return top N if requested
         if (topN > 0) {
             return results.stream()
                     .filter(r -> !r.isError())
                     .limit(topN)
-                    .collect(java.util.stream.Collectors.toList());
+                    .collect(Collectors.toList());
         }
-
         return results;
+    }
+
+    /** Overload — defaults to Nifty 50 (backward compatible) */
+    public List<Nifty50ScanResult> scanAll(String period, String exchange, int topN) {
+        return scanAll(period, exchange, topN, "NIFTY 50");
     }
 
     private Nifty50ScanResult runSingleStock(String symbol, String period, String exchange) {
         try {
-            List<Candle> candles = marketDataClient.fetchCandles(symbol, period, exchange);
+            List<Candle>   candles  = marketDataClient.fetchCandles(symbol, period, exchange);
             BacktestResult backtest = backtestService.run(symbol, candles);
 
             return Nifty50ScanResult.builder()
@@ -98,7 +95,7 @@ public class Nifty50ScannerService {
                     .build();
 
         } catch (Exception e) {
-            log.warn("Failed to process {}: {}", symbol, e.getMessage());
+            log.warn("Failed {}: {}", symbol, e.getMessage());
             return Nifty50ScanResult.builder()
                     .symbol(symbol)
                     .error(true)

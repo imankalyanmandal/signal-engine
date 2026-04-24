@@ -25,11 +25,13 @@ public class MarketDataClient {
     @Value("${market.data.service.url:http://localhost:5000}")
     private String dataServiceUrl;
 
+    // ── Candle data ───────────────────────────────────────────────────────────
+
     /**
-     * Fetch live OHLCV candles for a single stock.
+     * Fetch OHLCV candles from the Python market data service.
      *
      * @param symbol   NSE symbol e.g. HDFCBANK, TCS, INFY
-     * @param period   1mo | 3mo | 6mo | 1y | 2y | 5y
+     * @param period   5d | 1mo | 3mo | 6mo | 1y | 2y | 5y
      * @param exchange NS (NSE) or BO (BSE)
      */
     public List<Candle> fetchCandles(String symbol, String period, String exchange) {
@@ -70,12 +72,38 @@ public class MarketDataClient {
         return fetchCandles(symbol, "1y", "NS");
     }
 
+    // ── Current price ─────────────────────────────────────────────────────────
+
     /**
-     * Fetch the list of all Nifty 50 NSE symbols from the Python service.
+     * Fetch the latest close price for a stock.
+     * Used by TradeService scheduler to refresh active trade prices every 5 min.
+     *
+     * Fetches 5-day candles (not 1d — avoids empty results on weekends/holidays)
+     * and returns the most recent close.
+     *
+     * @param symbol NSE symbol e.g. HDFCBANK
+     * @return latest close price
+     */
+    public double fetchCurrentPrice(String symbol) {
+        List<Candle> candles = fetchCandles(symbol, "5d", "NS");
+        // candles are in chronological order — last entry is the most recent
+        return candles.get(candles.size() - 1).getClose();
+    }
+
+    // ── Symbol lists ──────────────────────────────────────────────────────────
+
+    /**
+     * Fetch the full Nifty 50 symbol list from the Python service.
+     * Pass ?index=NIFTY+100 for broader universe.
      */
     @SuppressWarnings("unchecked")
     public List<String> fetchNifty50Symbols() {
-        String url = dataServiceUrl + "/nifty50/symbols";
+        return fetchNifty50Symbols("NIFTY 50");
+    }
+
+    public List<String> fetchNifty50Symbols(String index) {
+        String url = dataServiceUrl + "/nifty50/symbols?index="
+                     + index.replace(" ", "+");
 
         try {
             ResponseEntity<Map<String, Object>> response =
@@ -96,6 +124,53 @@ public class MarketDataClient {
             throw new RuntimeException("Failed to fetch Nifty 50 symbols: " + e.getMessage(), e);
         }
     }
+
+
+    // ── Layer 2 — proxy to Python microservice ────────────────────────────────
+
+    /**
+     * Full LLM-powered Layer 2 analysis for a single stock.
+     * Calls Python /layer2/analyse?symbol=TECHM
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> fetchLayer2Analysis(String symbol) {
+        String url = dataServiceUrl + "/layer2/analyse?symbol=" + symbol;
+        try {
+            ResponseEntity<Map<String, Object>> response =
+                    restTemplate.exchange(url, HttpMethod.GET, null,
+                            new ParameterizedTypeReference<Map<String, Object>>() {});
+            Map<String, Object> body = response.getBody();
+            if (body == null) throw new RuntimeException("Empty response from /layer2/analyse");
+            return body;
+        } catch (ResourceAccessException e) {
+            throw new RuntimeException("Python service not running. Start with: python market_service.py", e);
+        } catch (Exception e) {
+            throw new RuntimeException("Layer 2 analysis failed for " + symbol + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Layer 2 scan for a comma-separated list of symbols.
+     * Calls Python /layer2/scan?symbols=TECHM,HDFCBANK
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> fetchLayer2Scan(String symbols) {
+        String url = dataServiceUrl + "/layer2/scan?symbols=" + symbols;
+        try {
+            ResponseEntity<Map<String, Object>> response =
+                    restTemplate.exchange(url, HttpMethod.GET, null,
+                            new ParameterizedTypeReference<Map<String, Object>>() {});
+            Map<String, Object> body = response.getBody();
+            if (body == null) throw new RuntimeException("Empty response from /layer2/scan");
+            return body;
+        } catch (ResourceAccessException e) {
+            throw new RuntimeException("Python service not running. Start with: python market_service.py", e);
+        } catch (Exception e) {
+            throw new RuntimeException("Layer 2 scan failed for [" + symbols + "]: " + e.getMessage(), e);
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private double toDouble(Object val) {
         if (val == null) return 0.0;

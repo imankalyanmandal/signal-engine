@@ -1,68 +1,54 @@
 package signal_engine.common.management.SignalEngineApplication.model;
 
+import lombok.Data;
 import java.util.List;
 import java.util.Map;
-import lombok.Data;
 
 /**
- * Layer 2 result from the LLM-powered composite scorer.
- * Claude reasons holistically across fundamentals, sentiment, and concall.
+ * Layer 2 composite result from the LLM-powered scorer.
+ * Deserialised from the Python microservice /layer2/analyse response.
+ *
+ * Fields used by TradeService.createSignalFromLayer2():
+ *   getSymbol(), getCompanyName(), getCompositeScore(),
+ *   getSwingVerdict(), getConviction(), getRationale(), getEntryNote()
  */
 @Data
 public class Layer2Result {
 
+    // ── Identity ──────────────────────────────────────────────────────────────
     private String  symbol;
     private String  companyName;
 
-    // ── Gate result ───────────────────────────────────────────────────────
+    // ── Gate result ───────────────────────────────────────────────────────────
     private boolean layer2Pass;
-    private double  compositeScore;
-    private double  passThreshold;
+    private int     compositeScore;
+    private int     passThreshold;
 
-    // ── Claude's verdict ──────────────────────────────────────────────────
-    /** STRONG_BUY | BUY | HOLD | AVOID | STRONG_AVOID */
-    private String swingVerdict;
-
-    /** HIGH | MEDIUM | LOW — how confident Claude is in the verdict */
-    private String conviction;
-
-    /** ALIGNED | MIXED | CONFLICTED — do all signals agree? */
-    private String signalAlignment;
-
-    /** Plain-English rationale mentioning specific numbers and any conflicts */
+    // ── LLM verdict ───────────────────────────────────────────────────────────
+    private String swingVerdict;        // STRONG_BUY | BUY | HOLD | AVOID | STRONG_AVOID
+    private String conviction;          // HIGH | MEDIUM | LOW
+    private String signalAlignment;     // ALIGNED | MIXED | CONFLICTED
     private String rationale;
-
-    /** Up to 3 specific reasons to enter the trade */
-    private List<String> keyPositives;
-
-    /** Up to 3 specific risks that could stop out the trade */
-    private List<String> keyRisks;
-
-    /** NOW | WAIT_FOR_PULLBACK | WAIT_FOR_CATALYST | NOT_NOW */
-    private String optimalEntryTiming;
-
-    /** One sentence on how/when to enter if verdict is BUY or STRONG_BUY */
+    private String optimalEntryTiming;  // NOW | WAIT_FOR_PULLBACK | WAIT_FOR_CATALYST | NOT_NOW
     private String entryNote;
 
-    /** Hard stop reasons — empty if none */
+    private List<String> keyPositives;
+    private List<String> keyRisks;
     private List<String> redFlags;
 
-    /**
-     * How Claude weighted each signal for this specific stock.
-     * Keys: fundamentals, sentiment, concall (sum to 100)
-     * These vary per stock — near earnings concall weight rises, etc.
-     */
+    // ── Context-adaptive weights ──────────────────────────────────────────────
     private Map<String, Integer> weightsUsed;
 
-    // ── Raw sub-results for transparency ─────────────────────────────────
+    // ── Raw sub-results (for transparency / UI display) ───────────────────────
     private FundamentalDetail fundamentals;
     private SentimentDetail   sentiment;
     private ConcallDetail     concall;
 
-    /** True if Claude API call failed and a fallback neutral result was used */
+    // ── Meta ──────────────────────────────────────────────────────────────────
     private boolean claudeFallback;
+    private boolean mock;
 
-    // ── Nested detail classes ─────────────────────────────────────────────
+    // ── Nested detail classes ─────────────────────────────────────────────────
 
     @Data
     public static class FundamentalDetail {
@@ -71,22 +57,28 @@ public class Layer2Result {
         private Double       promoterHolding;
         private Double       revenueGrowth3y;
         private Double       profitGrowth3y;
+        private Double       fcfLatestCr;
+        private List<Double> revenueSeries;
+        private List<Double> debtSeries;
+        private List<Double> ocfSeries;
+        private List<Double> promoterSeries;
+        private List<String> trendNotes;
         private List<String> flags;
     }
 
     @Data
     public static class SentimentDetail {
-        private String       direction;
-        private String       confidence;
+        private String       direction;      // BULLISH | NEUTRAL | BEARISH
+        private String       confidence;     // HIGH | MEDIUM | LOW
         private String       narrative;
         private List<String> topHeadlines;
     }
 
     @Data
     public static class ConcallDetail {
-        private String tone;
-        private String guidanceChange;
-        private String swingSignal;
+        private String tone;            // CONFIDENT | CAUTIOUS | CONCERNED
+        private String guidanceChange;  // RAISED | MAINTAINED | LOWERED | NOT_GIVEN
+        private String swingSignal;     // BUY_BIAS | HOLD_BIAS | SELL_BIAS | NEUTRAL
         private String summary;
         private String filingDate;
     }
