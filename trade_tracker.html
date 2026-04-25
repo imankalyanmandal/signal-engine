@@ -230,6 +230,10 @@ select option{background:var(--bg2)}
         <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><path stroke="currentColor" stroke-width="1.2" d="M2 13l3-4 3 2 3-5 3 2"/><rect x="2" y="2" width="12" height="11" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
         Stats
       </button>
+      <button class="nav-item" onclick="showPage('cache',this)">
+        <svg class="nav-icon" fill="none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2"/><path stroke="currentColor" stroke-width="1.2" d="M8 5v3l2 2"/></svg>
+        Cache
+      </button>
     </div>
 
     <div class="sidebar-footer">
@@ -295,10 +299,20 @@ select option{background:var(--bg2)}
           <div>
             <div class="form-label">Index</div>
             <select id="p-index">
-              <option value="NIFTY 50" selected>Nifty 50</option>
-              <option value="NIFTY 100">Nifty 100</option>
-              <option value="NIFTY 200">Nifty 200</option>
-              <option value="NIFTY NEXT 50">Nifty Next 50</option>
+              <optgroup label="Large Cap">
+                <option value="NIFTY 50" selected>Nifty 50</option>
+                <option value="NIFTY 100">Nifty 100</option>
+                <option value="NIFTY 200">Nifty 200</option>
+                <option value="NIFTY NEXT 50">Nifty Next 50</option>
+              </optgroup>
+              <optgroup label="Mid Cap">
+                <option value="NIFTY MIDCAP 100">Nifty Midcap 100</option>
+                <option value="NIFTY MIDCAP 150">Nifty Midcap 150</option>
+                <option value="NIFTY LARGEMIDCAP 250">Nifty LargeMidcap 250</option>
+              </optgroup>
+              <optgroup label="Small Cap">
+                <option value="NIFTY SMALLCAP 250">Nifty Smallcap 250</option>
+              </optgroup>
             </select>
           </div>
           <div>
@@ -374,6 +388,44 @@ select option{background:var(--bg2)}
         </div>
       </div>
       <div id="history-list"></div>
+    </div>
+
+    <!-- Cache page -->
+    <div id="page-cache" class="page" style="display:none">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Cache</div>
+          <div class="page-sub">Symbol lists cached 30 days · Candle data cached 4 hours</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-ghost btn-sm" onclick="loadCache()">↻ Refresh</button>
+          <button class="btn btn-danger btn-sm" onclick="invalidateCache('all')">🗑 Clear all</button>
+        </div>
+      </div>
+      <div class="grid2" style="margin-bottom:16px">
+        <div class="metric">
+          <div class="mlabel">Hit rate</div>
+          <div class="mval pos" id="cache-hitrate">—</div>
+        </div>
+        <div class="metric">
+          <div class="mlabel">Cached entries</div>
+          <div class="mval" id="cache-entries">—</div>
+        </div>
+      </div>
+      <div class="card" style="padding:14px 16px;margin-bottom:12px">
+        <div class="row" style="margin-bottom:10px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text2)">Symbol lists (30d TTL)</div>
+          <button class="btn btn-ghost btn-sm" onclick="invalidateCache('symbols')">↻ Force refresh</button>
+        </div>
+        <div id="cache-symbols" style="font-family:var(--mono);font-size:11px;color:var(--text3)">Loading...</div>
+      </div>
+      <div class="card" style="padding:14px 16px">
+        <div class="row" style="margin-bottom:10px">
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text2)">Candle data (4h TTL)</div>
+          <button class="btn btn-ghost btn-sm" onclick="invalidateCache('candles')">↻ Force refresh</button>
+        </div>
+        <div id="cache-candles" style="font-family:var(--mono);font-size:11px;color:var(--text3)">Loading...</div>
+      </div>
     </div>
 
     <!-- Stats page -->
@@ -461,6 +513,7 @@ function showPage(name, btn) {
   btn.classList.add('active');
   if (name === 'signals' || name === 'active' || name === 'history') refresh();
   if (name === 'stats') loadStats();
+  if (name === 'cache') loadCache();
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
@@ -1065,7 +1118,51 @@ function showError(msg) {
 }
 function hideError() { document.getElementById('error-bar').style.display = 'none'; }
 
-// ── Close on backdrop ──────────────────────────────────────────────────────────
+// ── Cache management ──────────────────────────────────────────────────────────
+async function loadCache() {
+  try {
+    const r = await fetch(`${BASE()}/api/v1/live/cache/status`);
+    if (!r.ok) { showError('Cache endpoint unavailable'); return; }
+    const d = await r.json();
+    const stats = d.stats || {};
+    document.getElementById('cache-hitrate').textContent  = stats.hit_rate || '—';
+    document.getElementById('cache-entries').textContent  = stats.valid_entries || '0';
+
+    const keys  = d.keys || [];
+    const syms  = keys.filter(k => k.key.startsWith('symbols:'));
+    const cands = keys.filter(k => k.key.startsWith('candles:'));
+
+    document.getElementById('cache-symbols').innerHTML = syms.length
+      ? syms.map(k => `<div style="margin-bottom:4px">✓ ${k.key.replace('symbols:','')} — expires in ${k.ttl_remaining}</div>`).join('')
+      : '<div style="color:var(--text3)">No symbol lists cached — will fetch from NSE on next scan</div>';
+
+    document.getElementById('cache-candles').innerHTML = cands.length
+      ? `<div style="color:var(--text2)">${cands.length} stock(s) cached</div>` +
+        cands.slice(0,5).map(k => `<div style="margin-top:3px">${k.key.replace('candles:','').replace(/_NS|_BO/,'.')} — ${k.ttl_remaining} left</div>`).join('') +
+        (cands.length > 5 ? `<div style="margin-top:3px;color:var(--text3)">...and ${cands.length-5} more</div>` : '')
+      : '<div style="color:var(--text3)">No candle data cached — fetches fresh from Yahoo Finance</div>';
+  } catch(e) {
+    showError('Cache status unavailable: ' + e.message);
+  }
+}
+
+async function invalidateCache(type) {
+  const urls = {
+    all:     '/api/v1/live/cache/invalidate/all',
+    symbols: '/api/v1/live/cache/invalidate/symbols',
+    candles: '/api/v1/live/cache/invalidate/candles',
+  };
+  try {
+    const r = await fetch(`${BASE()}${urls[type]}`, {method:'POST'});
+    const d = await r.json();
+    showError(d.message || 'Cache cleared');
+    loadCache();
+  } catch(e) {
+    showError('Cache invalidation failed: ' + e.message);
+  }
+}
+
+// ── Close on backdrop ──────────────────────────────────────────────────────────────
 document.getElementById('modal').addEventListener('click', e => {
   if (e.target === document.getElementById('modal')) closeModal();
 });

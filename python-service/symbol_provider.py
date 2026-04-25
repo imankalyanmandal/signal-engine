@@ -7,6 +7,7 @@ Handles two known Yahoo Finance quirks for Indian stocks:
 """
 
 import requests
+from cache import get_symbols as cache_get_symbols, set_symbols as cache_set_symbols
 
 # ── Yahoo Finance ticker exceptions ───────────────────────────────────────────
 # Symbols that need special mapping for Yahoo Finance
@@ -24,14 +25,19 @@ YAHOO_EXCEPTIONS = {
 INDEX_KEYWORDS = {
     "NIFTY", "SENSEX", "MIDCAP", "SMALLCAP", "LARGECAP",
     "NEXT50", "NEXT 50", "NIFTY50", "NIFTY 50",
+    "LARGEMIDCAP", "LARGE MIDCAP",
 }
 
 # ── NSE index constituent URLs ────────────────────────────────────────────────
 INDEX_URLS = {
-    "NIFTY 50":      "https://archives.nseindia.com/content/indices/ind_nifty50list.csv",
-    "NIFTY 100":     "https://archives.nseindia.com/content/indices/ind_nifty100list.csv",
-    "NIFTY 200":     "https://archives.nseindia.com/content/indices/ind_nifty200list.csv",
-    "NIFTY NEXT 50": "https://archives.nseindia.com/content/indices/ind_niftynext50list.csv",
+    "NIFTY 50":           "https://archives.nseindia.com/content/indices/ind_nifty50list.csv",
+    "NIFTY 100":          "https://archives.nseindia.com/content/indices/ind_nifty100list.csv",
+    "NIFTY 200":          "https://archives.nseindia.com/content/indices/ind_nifty200list.csv",
+    "NIFTY NEXT 50":      "https://archives.nseindia.com/content/indices/ind_niftynext50list.csv",
+    "NIFTY MIDCAP 100":   "https://archives.nseindia.com/content/indices/ind_niftymidcap100list.csv",
+    "NIFTY MIDCAP 150":   "https://archives.nseindia.com/content/indices/ind_niftymidcap150list.csv",
+    "NIFTY SMALLCAP 250": "https://archives.nseindia.com/content/indices/ind_niftysmallcap250list.csv",
+    "NIFTY LARGEMIDCAP 250": "https://archives.nseindia.com/content/indices/ind_niftylargemidcap250list.csv",
 }
 
 # ── Hardcoded fallback lists ───────────────────────────────────────────────────
@@ -52,27 +58,39 @@ NIFTY_50_FALLBACK = [
 def get_symbols(index: str = "NIFTY 50") -> list:
     """
     Returns NSE symbols for the given index.
-    Tries live NSE CSV first, falls back to hardcoded list.
 
-    Filters out:
-    - Index name tokens (e.g. "NIFTY 200" appearing as a symbol)
-    - Duplicates
-    - Non-stock entries
+    Cache:  Symbols are cached for 30 days — index constituents rarely change.
+            Call invalidate_symbols(index) to force a refresh.
+    Source: NSE CSV API → hardcoded fallback (Nifty 50 only)
+
+    Filters out index name tokens, duplicates, and invalid entries.
     """
     index = index.upper().strip()
-    url   = INDEX_URLS.get(index)
 
+    # ── Check cache first ─────────────────────────────────────────────────────
+    cached = cache_get_symbols(index)
+    if cached:
+        print(f"  [Cache HIT] {index} — {len(cached)} symbols (no NSE call needed)")
+        return cached
+
+    print(f"  [Cache MISS] {index} — fetching from NSE...")
+
+    # ── Fetch from NSE ────────────────────────────────────────────────────────
+    url = INDEX_URLS.get(index)
     if url:
         symbols = _fetch_from_nse(url)
         if symbols:
-            return _clean(symbols)
+            cleaned = _clean(symbols)
+            cache_set_symbols(index, cleaned)   # cache for 30 days
+            return cleaned
 
-    # Fallback for Nifty 50
+    # ── Fallback for Nifty 50 only ────────────────────────────────────────────
     if index in ("NIFTY 50", "NIFTY50"):
         print(f"  [symbol_provider] Using fallback list for {index}")
-        return _clean(NIFTY_50_FALLBACK)
+        cleaned = _clean(NIFTY_50_FALLBACK)
+        cache_set_symbols(index, cleaned)
+        return cleaned
 
-    # For other indices, return empty — caller handles error
     print(f"  [symbol_provider] No data for index: {index}")
     return []
 

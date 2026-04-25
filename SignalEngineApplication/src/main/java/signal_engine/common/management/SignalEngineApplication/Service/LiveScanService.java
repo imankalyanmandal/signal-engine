@@ -9,454 +9,533 @@ import signal_engine.common.management.SignalEngineApplication.Indicators.RSIInd
 import signal_engine.common.management.SignalEngineApplication.Indicators.SMAIndicator;
 import signal_engine.common.management.SignalEngineApplication.model.Candle;
 import signal_engine.common.management.SignalEngineApplication.model.LiveScanResult;
+import signal_engine.common.management.SignalEngineApplication.model.MarketRegime;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * LiveScanService — maximum selectivity swing trade filter.
+ * LiveScanService — two-pathway swing trade detection with strict mechanical rules.
  *
- * ═══════════════════════════════════════════════════════════
- *  HARD GATES (all must pass — no score compensation)
- * ═══════════════════════════════════════════════════════════
- *  Gate 1 — Uptrend:           SMA20 > SMA50
- *  Gate 2 — Structural:        Price > SMA50
- *  Gate 3 — RSI range:         20 ≤ RSI ≤ 68 (not crash, not extended)
- *  Gate 4 — Volume minimum:    volume ≥ 0.8× 20d avg (minimum liquidity)
- *  Gate 5 — Stop width:        ATR-based stop ≤ 8% of price
- *  Gate 6 — Relative strength: stock 20d return ≥ Nifty 20d return (outperforming)
- *  Gate 7 — Momentum:          ≥ 5 of last 10 candles closed green
+ * ════════════════════════════════════════════════════════════════════════
+ *  HARD GATES (ALL must pass — any failure = BLOCKED, no scoring)
+ * ════════════════════════════════════════════════════════════════════════
  *
- * ═══════════════════════════════════════════════════════════
- *  SCORING BONUSES (add points but never block a stock)
- * ═══════════════════════════════════════════════════════════
- *  Bonus A — SMA50 slope positive (+10 pts): weekly trend accelerating
- *  Bonus B — Higher high + higher low (+10 pts): clean price structure
+ *  Gate 1  Price > SMA50 AND SMA50 slope positive
+ *          → Stock must be in an uptrend AND trend must be accelerating
  *
- * Rationale: Gates 6 (SMA50 slope) and 8 (price structure) were demoted
- * from hard gates because together they produced 0 results in mixed markets.
- * They still reward better setups through the scoring system.
+ *  Gate 2  ATR% between 1% and 6%
+ *          → Too low (<1%) = dead stock. Too high (>6%) = too risky.
  *
- * ═══════════════════════════════════════════════════════════
- *  SOFT WARNINGS (don't block, but flag in result)
- * ═══════════════════════════════════════════════════════════
- *  Warn A — Near 52-week high: stock within 8% of 52w high (resistance ahead)
+ *  Gate 3  Price structure: last 3 swings show HH + HL
+ *          → Uptrend confirmed at the price action level
  *
- * ═══════════════════════════════════════════════════════════
- *  SCORING (0-100, only stocks that passed ALL gates)
- * ═══════════════════════════════════════════════════════════
- *  RSI zone          0-40  (sweet spot 30-45 = max; 55-68 = near zero)
- *  Trend quality     0-30  (above SMA20, pullback to SMA20)
- *  Volume quality    0-20  (1.5x+ = strong; <1.0x = penalty)
- *  Stop tightness    0-10  (≤4% = full points)
+ *  Gate 4  Risk % ≤ 4% (stop to entry distance)
+ *          → Position must be sizeable enough to matter
  *
- * ═══════════════════════════════════════════════════════════
- *  SECTOR DEDUP (final step)
- * ═══════════════════════════════════════════════════════════
- *  Only the highest-scoring stock per sector survives.
- *  Prevents taking 4 IT stocks in the same trade.
+ *  Gate 5  Market regime not BEAR or VOLATILE
+ *          → Never fight the market
  *
- * Expected output: 2-5 stocks → Layer 2 LLM → 2-3 final signals
+ * ════════════════════════════════════════════════════════════════════════
+ *  SETUP TYPE DETECTION (after gates pass)
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ *  PULLBACK setup:
+ *    - Price within ±2% of SMA20 (pulling back to support)
+ *    - RSI between 35–50 (oversold enough to be buyable)
+ *    - Volume ≥ 1.5× average (institutional interest)
+ *    - NOT within 5% of 52-week high (resistance overhead)
+ *
+ *  BREAKOUT setup:
+ *    - Price above the most recent swing high (breaking out)
+ *    - Volume ≥ 2.0× average (breakout MUST have volume confirmation)
+ *    - RSI between 55–65 (momentum without being overbought)
+ *    - CAN be within 5% of 52-week high (breakout to new highs is valid)
+ *
+ *  If NEITHER pullback NOR breakout → BLOCKED
+ *  Near 52-week high (<5%) → ONLY breakout allowed, pullback REJECTED
+ *
+ * ════════════════════════════════════════════════════════════════════════
+ *  SCORING (0-100, only for stocks that passed all gates + setup type)
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ *  RSI quality      0-30  (how well RSI fits the setup type)
+ *  Volume quality   0-30  (how strong the volume confirmation is)
+ *  SMA200 filter    0-20  (price above SMA200 = long-term uptrend)
+ *  ATR quality      0-10  (tighter ATR = better R:R potential)
+ *  RS vs Nifty      0-10  (outperforming = institutional buying)
+ *
+ * ════════════════════════════════════════════════════════════════════════
+ *  SECTOR DEDUP (final step before returning results)
+ * ════════════════════════════════════════════════════════════════════════
+ *  Only the highest-scoring stock per sector makes it through.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class LiveScanService {
 
-    private final MarketDataClient marketDataClient;
+    private final MarketDataClient    marketDataClient;
+    private final MarketRegimeService marketRegimeService;
 
-    // ── Nifty 50 reference — for relative strength calculation ─────────────────
-    // Symbol used to compute the benchmark return for RS filter
-    private static final String NIFTY_PROXY = "NIFTYBEES"; // ETF that tracks Nifty 50
+    private static final String NIFTY_PROXY = "NIFTYBEES";
 
     // ── Configurable thresholds ────────────────────────────────────────────────
+
+    @Value("${live.scan.thread.count:10}")
+    private int MAX_THREADS;           // parallel threads for stock analysis
 
     @Value("${live.scan.data.period:3mo}")
     private String DATA_PERIOD;
 
-    // Gate 3 — RSI
-    @Value("${live.scan.rsi.max:68}")
-    private double RSI_MAX;
-
-    @Value("${live.scan.rsi.min:20}")
-    private double RSI_MIN;
-
-    // Gate 4 — Volume minimum
-    @Value("${live.scan.volume.min.gate:0.8}")
-    private double VOLUME_MIN_GATE;
-
-    // Gate 5 — Stop width
-    @Value("${live.scan.stop.max.pct:8.0}")
-    private double STOP_MAX_PCT;
-
-    // Gate 6 — SMA50 slope lookback
+    // Gate 1
     @Value("${live.scan.sma50.slope.bars:10}")
     private int SMA50_SLOPE_BARS;
 
-    // Gate 7 — Relative strength lookback
-    @Value("${live.scan.rs.lookback.bars:20}")
-    private int RS_LOOKBACK_BARS;
+    // Gate 2 — ATR bounds
+    @Value("${live.scan.atr.pct.min:1.0}")
+    private double ATR_PCT_MIN;
 
-    // Gate 8 — Price structure lookback
+    @Value("${live.scan.atr.pct.max:6.0}")
+    private double ATR_PCT_MAX;
+
+    // Gate 3 — Swing structure lookback
     @Value("${live.scan.structure.lookback.bars:20}")
-    private int STRUCTURE_LOOKBACK_BARS;
+    private int STRUCTURE_LOOKBACK;
 
-    // Gate 9 — Momentum candles
-    @Value("${live.scan.momentum.bars:10}")
-    private int MOMENTUM_BARS;
+    // Gate 4 — Max risk
+    @Value("${live.scan.stop.max.pct:4.0}")
+    private double STOP_MAX_PCT;
 
-    @Value("${live.scan.momentum.min.green:5}")
-    private int MOMENTUM_MIN_GREEN;
+    // Setup detection
+    @Value("${live.scan.pullback.band:0.02}")
+    private double PULLBACK_BAND;           // ±2% of SMA20
 
-    // Warn A — Near 52w high threshold
-    @Value("${live.scan.resistance.pct:8.0}")
-    private double RESISTANCE_PCT;
+    @Value("${live.scan.resistance.pct:5.0}")
+    private double RESISTANCE_PCT;          // within 5% of 52w high = near resistance
 
-    // Scoring
-    @Value("${live.scan.rsi.sweet.low:30}")
-    private double RSI_SWEET_LOW;
+    // RSI windows
+    @Value("${live.scan.pullback.rsi.low:35}")
+    private double PULLBACK_RSI_LOW;
 
-    @Value("${live.scan.rsi.sweet.high:45}")
-    private double RSI_SWEET_HIGH;
+    @Value("${live.scan.pullback.rsi.high:50}")
+    private double PULLBACK_RSI_HIGH;
 
-    @Value("${live.scan.volume.strong:1.5}")
-    private double VOLUME_STRONG;
+    @Value("${live.scan.breakout.rsi.low:55}")
+    private double BREAKOUT_RSI_LOW;
 
-    @Value("${live.scan.volume.ok:1.2}")
-    private double VOLUME_OK;
+    @Value("${live.scan.breakout.rsi.high:65}")
+    private double BREAKOUT_RSI_HIGH;
 
+    // Volume
+    @Value("${live.scan.volume.pullback.min:1.5}")
+    private double VOL_PULLBACK_MIN;
+
+    @Value("${live.scan.volume.breakout.min:2.0}")
+    private double VOL_BREAKOUT_MIN;
+
+    // Stop/target
     @Value("${live.scan.atr.multiplier:2.0}")
     private double ATR_MULTIPLIER;
 
     @Value("${live.scan.rr.ratio:2.0}")
     private double RR_RATIO;
 
-    @Value("${live.scan.setup.min.score:40}")
+    // Minimum score to surface as a valid setup
+    @Value("${live.scan.setup.min.score:50}")
     private int SETUP_MIN_SCORE;
 
-    // ── Public entry points ────────────────────────────────────────────────────
+    // RS lookback
+    @Value("${live.scan.rs.lookback.bars:20}")
+    private int RS_LOOKBACK_BARS;
+
+    // ── Public API ─────────────────────────────────────────────────────────────
 
     public List<LiveScanResult> scan(String index, int topN) {
+        return scan(index, topN, null);
+    }
+
+    public List<LiveScanResult> scan(String index, int topN, MarketRegime regime) {
         List<String> symbols = marketDataClient.fetchNifty50Symbols(index);
-        log.info("[LiveScan] {} — {} stocks", index, symbols.size());
+        log.info("[LiveScan] {} — {} stocks | regime={}", index, symbols.size(),
+                regime != null ? regime.getRegime() : "not checked");
 
-        // Fetch Nifty benchmark return for RS filter
         double niftyReturn = fetchBenchmarkReturn();
-        log.info("[LiveScan] Nifty 20d return: {}%", String.format("%.2f", niftyReturn));
 
-        List<LiveScanResult> results = new ArrayList<>();
-        int gatePassCount = 0;
+        // ── Parallel execution ─────────────────────────────────────────────────
+        // Uses a thread pool to fetch and analyse multiple stocks concurrently.
+        // Thread count is bounded to avoid overwhelming Yahoo Finance with requests.
+        int threadCount = Math.min(symbols.size(), MAX_THREADS);
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threadCount);
 
+        // Submit all analysis tasks
+        List<java.util.concurrent.Future<LiveScanResult>> futures = new java.util.ArrayList<>();
         for (String symbol : symbols) {
-            try {
-                LiveScanResult r = analyseOne(symbol, niftyReturn);
-                results.add(r);
-                if (!r.isError() && r.isSetup()) gatePassCount++;
-                Thread.sleep(200);
-            } catch (Exception e) {
-                log.warn("[LiveScan] {} error: {}", symbol, e.getMessage());
-                results.add(LiveScanResult.error(symbol, e.getMessage()));
-            }
+            final double niftyRet   = niftyReturn;
+            final MarketRegime reg  = regime;
+            futures.add(executor.submit(() -> {
+                try {
+                    // Stagger requests slightly to avoid Yahoo Finance rate limiting
+                    Thread.sleep((long)(Math.random() * 500));
+                    return analyseOne(symbol, niftyRet, reg);
+                } catch (Exception e) {
+                    log.warn("[LiveScan] {} error: {}", symbol, e.getMessage());
+                    return LiveScanResult.error(symbol, e.getMessage());
+                }
+            }));
         }
 
-        log.info("[LiveScan] Gates passed: {}/{}", gatePassCount, symbols.size());
+        // Collect results
+        List<LiveScanResult> results = new java.util.ArrayList<>();
+        for (java.util.concurrent.Future<LiveScanResult> future : futures) {
+            try {
+                results.add(future.get(30, java.util.concurrent.TimeUnit.SECONDS));
+            } catch (java.util.concurrent.TimeoutException e) {
+                log.warn("[LiveScan] Task timed out after 30s");
+            } catch (Exception e) {
+                log.warn("[LiveScan] Task failed: {}", e.getMessage());
+            }
+        }
+        executor.shutdown();
 
-        // ── Sector deduplication ───────────────────────────────────────────────
-        // Among setups, keep only the highest-scoring stock per sector
+        // Sort: valid setups by score desc → blocked → errors
+        results.sort(Comparator
+                .<LiveScanResult>comparingInt(r ->
+                        r.isError() ? 2 : r.isSetup() ? 0 : 1)
+                .thenComparingInt(r -> -r.getSetupScore()));
+
+        // Sector dedup
         List<LiveScanResult> setups = results.stream()
                 .filter(r -> !r.isError() && r.isSetup())
                 .collect(Collectors.toList());
 
         Map<String, LiveScanResult> bestPerSector = new LinkedHashMap<>();
         for (LiveScanResult r : setups) {
-            String sector = NiftySectorMap.getSector(r.getSymbol());
-            if (!bestPerSector.containsKey(sector) ||
-                r.getSetupScore() > bestPerSector.get(sector).getSetupScore()) {
-                bestPerSector.put(sector, r);
+            String sec = NiftySectorMap.getSector(r.getSymbol());
+            if (!bestPerSector.containsKey(sec) ||
+                    r.getSetupScore() > bestPerSector.get(sec).getSetupScore()) {
+                bestPerSector.put(sec, r);
             }
         }
 
-        List<LiveScanResult> deduplicated = bestPerSector.values().stream()
+        List<LiveScanResult> deduped = bestPerSector.values().stream()
                 .sorted(Comparator.comparingInt(LiveScanResult::getSetupScore).reversed())
                 .collect(Collectors.toList());
 
-        log.info("[LiveScan] After sector dedup: {} stocks → Layer 2", deduplicated.size());
+        log.info("[LiveScan] {} setups → {} after sector dedup", setups.size(), deduped.size());
 
         if (topN > 0) {
-            return deduplicated.stream().limit(topN).collect(Collectors.toList());
+            return deduped.stream().limit(topN).collect(Collectors.toList());
         }
-        return deduplicated;
+        return deduped;
     }
 
-    /** Convenience overload — fetches Nifty benchmark internally. Used by single-stock endpoint. */
     public LiveScanResult analyseOne(String symbol) {
-        return analyseOne(symbol, fetchBenchmarkReturn());
+        return analyseOne(symbol, fetchBenchmarkReturn(), null);
     }
 
-    public LiveScanResult analyseOne(String symbol, double niftyReturn20d) {
+    public LiveScanResult analyseOne(String symbol, double niftyReturn, MarketRegime regime) {
         List<Candle> candles = marketDataClient.fetchCandles(symbol, DATA_PERIOD, "NS");
-
         if (candles == null || candles.size() < 55) {
             return LiveScanResult.error(symbol,
-                    "Insufficient data (" + (candles == null ? 0 : candles.size()) + " bars, need 55+)");
+                    "Insufficient data (" + (candles == null ? 0 : candles.size()) + " bars)");
         }
 
         int    last  = candles.size() - 1;
         double price = candles.get(last).getClose();
 
-        // ── Indicators ────────────────────────────────────────────────────────
-        Double rsi   = RSIIndicator.calculate(candles, last, 14);
-        Double sma20 = SMAIndicator.calculate(candles, last, 20);
-        Double sma50 = SMAIndicator.calculate(candles, last, 50);
-        Double atr   = ATRIndicator.calculate(candles, last, 14);
+        // ── Indicators ─────────────────────────────────────────────────────────
+        Double rsi    = RSIIndicator.calculate(candles, last, 14);
+        Double sma20  = SMAIndicator.calculate(candles, last, 20);
+        Double sma50  = SMAIndicator.calculate(candles, last, 50);
+        Double sma200 = SMAIndicator.calculate(candles, last, 200);
+        Double atr    = ATRIndicator.calculate(candles, last, 14);
 
         if (rsi == null || sma20 == null || sma50 == null || atr == null) {
             return LiveScanResult.error(symbol, "Indicator warmup incomplete");
         }
 
-        // ── Derived ───────────────────────────────────────────────────────────
-        double avgVolume20 = candles.subList(last - 19, last + 1)
+        double atrPct = (atr / price) * 100;
+
+        // Volume ratio vs 20-day average
+        double avgVol20 = candles.subList(last - 19, last + 1)
                 .stream().mapToDouble(Candle::getVolume).average().orElse(0);
-        double volumeRatio = avgVolume20 > 0 ? candles.get(last).getVolume() / avgVolume20 : 0;
+        double volumeRatio = avgVol20 > 0 ? candles.get(last).getVolume() / avgVol20 : 0;
 
-        boolean uptrend         = sma20 > sma50;
-        boolean aboveSma50      = price > sma50;
-        boolean aboveSma20      = price > sma20;
-        boolean pullbackToSma20 = price >= sma20 * 0.97 && price <= sma20 * 1.03;
+        // SMA50 slope
+        boolean sma50SlopePositive = isSma50SlopePositive(candles, last);
 
+        // Swing structure
+        boolean higherHigh = hasHigherHigh(candles, last, STRUCTURE_LOOKBACK);
+        boolean higherLow  = hasHigherLow(candles, last, STRUCTURE_LOOKBACK);
+
+        // Recent high (for breakout detection)
+        double recentHigh = candles.subList(Math.max(0, last - STRUCTURE_LOOKBACK), last)
+                .stream().mapToDouble(Candle::getHigh).max().orElse(price);
+
+        // 52-week high
+        double high52w     = candles.stream().mapToDouble(Candle::getHigh).max().orElse(price);
+        double pctTo52wHigh = ((high52w - price) / price) * 100;
+        boolean nearResistance = pctTo52wHigh < RESISTANCE_PCT;
+
+        // Relative strength
+        double stockReturn = computeReturn(candles, last, RS_LOOKBACK_BARS);
+        boolean outperforms = stockReturn >= niftyReturn;
+
+        // ATR-based stop/target
         double stopLoss  = price - (ATR_MULTIPLIER * atr);
         double target    = price + (ATR_MULTIPLIER * atr * RR_RATIO);
         double riskPct   = ((price - stopLoss) / price) * 100;
         double rewardPct = ((target - price) / price) * 100;
         double rrRatio   = riskPct > 0 ? rewardPct / riskPct : 0;
 
-        // Gate 6 — SMA50 slope (last N bars of SMA50 trending up)
-        boolean sma50SlopePositive = isSma50SlopePositive(candles, last);
-
-        // Gate 7 — Relative strength vs Nifty
-        double stockReturn20d  = computeReturn(candles, last, RS_LOOKBACK_BARS);
-        boolean outperformsNifty = stockReturn20d >= niftyReturn20d;
-
-        // Gate 8 — Price structure: higher high + higher low in last N bars
-        boolean higherHigh = hasHigherHigh(candles, last, STRUCTURE_LOOKBACK_BARS);
-        boolean higherLow  = hasHigherLow(candles, last, STRUCTURE_LOOKBACK_BARS);
-
-        // Gate 9 — Momentum: green candle count
-        int greenCandles = countGreenCandles(candles, last, MOMENTUM_BARS);
-        boolean momentumOk = greenCandles >= MOMENTUM_MIN_GREEN;
-
-        // Warn A — Near 52-week high
-        double high52w = candles.stream().mapToDouble(Candle::getHigh).max().orElse(price);
-        double pctTo52wHigh = ((high52w - price) / price) * 100;
-        boolean nearResistance = pctTo52wHigh < RESISTANCE_PCT;
-
         String sector = NiftySectorMap.getSector(symbol);
 
-        // ── Phase 1: Hard gates ───────────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+        // PHASE 1: HARD GATES
+        // ══════════════════════════════════════════════════════════════════════
         List<String> gateFailures = new ArrayList<>();
 
-        if (!uptrend)
+        // Gate 1: Price > SMA50 AND SMA50 slope positive
+        if (price <= sma50) {
             gateFailures.add(String.format(
-                "Downtrend — SMA20 (%.2f) < SMA50 (%.2f)", sma20, sma50));
-        if (!aboveSma50)
+                    "Gate 1: Price (%.2f) ≤ SMA50 (%.2f) — not in uptrend", price, sma50));
+        }
+        if (!sma50SlopePositive) {
             gateFailures.add(String.format(
-                "Price (%.2f) below SMA50 (%.2f) — structural weakness", price, sma50));
-        if (rsi > RSI_MAX)
-            gateFailures.add(String.format(
-                "RSI overbought (%.1f > %.0f) — don't chase", rsi, RSI_MAX));
-        if (rsi < RSI_MIN)
-            gateFailures.add(String.format(
-                "RSI crash territory (%.1f < %.0f) — avoid", rsi, RSI_MIN));
-        if (volumeRatio < VOLUME_MIN_GATE)
-            gateFailures.add(String.format(
-                "Volume too thin (%.1fx < %.1fx minimum)", volumeRatio, VOLUME_MIN_GATE));
-        if (riskPct > STOP_MAX_PCT)
-            gateFailures.add(String.format(
-                "Stop too wide (%.1f%% > %.0f%%) — position sizing won't work", riskPct, STOP_MAX_PCT));
-        // Gates 6 (SMA50 slope) and 8 (price structure) are now scoring bonuses,
-        // not hard gates — too strict when combined, produces 0 results in mixed markets.
+                    "Gate 1: SMA50 slope flat/negative over last %d bars", SMA50_SLOPE_BARS));
+        }
 
-        if (!outperformsNifty)
+        // Gate 2: ATR bounds
+        if (atrPct < ATR_PCT_MIN) {
             gateFailures.add(String.format(
-                "Underperforming Nifty over %d days (stock %.1f%% vs Nifty %.1f%%)",
-                RS_LOOKBACK_BARS, stockReturn20d, niftyReturn20d));
-        if (!momentumOk)
+                    "Gate 2: ATR %.1f%% too low (min %.0f%%) — stock not moving", atrPct, ATR_PCT_MIN));
+        }
+        if (atrPct > ATR_PCT_MAX) {
             gateFailures.add(String.format(
-                "Low momentum — only %d/%d green candles (need %d+)",
-                greenCandles, MOMENTUM_BARS, MOMENTUM_MIN_GREEN));
+                    "Gate 2: ATR %.1f%% too high (max %.0f%%) — too volatile to size correctly", atrPct, ATR_PCT_MAX));
+        }
+
+        // Gate 3: HH + HL price structure
+        if (!higherHigh || !higherLow) {
+            gateFailures.add(String.format(
+                    "Gate 3: Weak structure — %s%s in last %d bars",
+                    higherHigh ? "" : "no higher high ",
+                    higherLow  ? "" : "no higher low",
+                    STRUCTURE_LOOKBACK));
+        }
+
+        // Gate 4: Risk % ≤ 4%
+        if (riskPct > STOP_MAX_PCT) {
+            gateFailures.add(String.format(
+                    "Gate 4: Risk %.1f%% > %.0f%% max — stop too wide", riskPct, STOP_MAX_PCT));
+        }
+
+        // Gate 5: Market regime
+        if (regime != null && !regime.isTradeable()) {
+            gateFailures.add("Gate 5: Market regime " + regime.getRegime() + " — " + regime.getReason());
+        }
 
         if (!gateFailures.isEmpty()) {
-            return buildBlocked(symbol, sector, price, rsi, sma20, sma50, atr,
-                    volumeRatio, uptrend, aboveSma50, aboveSma20, pullbackToSma20,
-                    stopLoss, target, riskPct, rewardPct, rrRatio,
-                    stockReturn20d, pctTo52wHigh, greenCandles, sma50SlopePositive,
-                    outperformsNifty, higherHigh, higherLow, gateFailures);
+            return buildResult(symbol, sector, price, rsi, sma20, sma50, sma200, atr, atrPct,
+                    volumeRatio, niftyReturn, stockReturn, outperforms,
+                    sma50SlopePositive, higherHigh, higherLow, nearResistance,
+                    pctTo52wHigh, stopLoss, target, riskPct, rewardPct, rrRatio,
+                    0, false, "BLOCKED", "LOW", "BLOCKED", List.of(), gateFailures);
         }
 
-        // ── Phase 2: Scoring ──────────────────────────────────────────────────
-        int score = 0;
-        List<String> conditions = new ArrayList<>();
-        List<String> warnings   = new ArrayList<>();
+        // ══════════════════════════════════════════════════════════════════════
+        // PHASE 2: SETUP TYPE DETECTION
+        // ══════════════════════════════════════════════════════════════════════
+        boolean isPullback = Math.abs(price - sma20) / sma20 <= PULLBACK_BAND;
+        boolean isBreakout = price > recentHigh && volumeRatio >= VOL_BREAKOUT_MIN;
 
-        // RSI zone (0-40 pts) — primary timing signal
-        if (rsi >= RSI_SWEET_LOW && rsi <= RSI_SWEET_HIGH) {
-            score += 40;
-            conditions.add(String.format("RSI in sweet spot (%.1f) — oversold but recovering", rsi));
-        } else if (rsi < RSI_SWEET_LOW) {
-            score += 25;
-            conditions.add(String.format("RSI oversold (%.1f)", rsi));
-            warnings.add("Deeply oversold — wait for one green close to confirm recovery");
-        } else if (rsi <= 55) {
+        // No valid setup type
+        if (!isPullback && !isBreakout) {
+            return buildBlocked(symbol, sector, price, rsi, sma20, sma50, sma200, atr, atrPct,
+                    volumeRatio, niftyReturn, stockReturn, outperforms,
+                    sma50SlopePositive, higherHigh, higherLow, nearResistance,
+                    pctTo52wHigh, stopLoss, target, riskPct, rewardPct, rrRatio,
+                    List.of("Neither pullback (not within 2% of SMA20) nor breakout (not above recent high " +
+                            String.format("%.2f", recentHigh) + " with 2×volume)"));
+        }
+
+        // Near resistance: only breakout is valid
+        if (nearResistance && !isBreakout) {
+            return buildBlocked(symbol, sector, price, rsi, sma20, sma50, sma200, atr, atrPct,
+                    volumeRatio, niftyReturn, stockReturn, outperforms,
+                    sma50SlopePositive, higherHigh, higherLow, nearResistance,
+                    pctTo52wHigh, stopLoss, target, riskPct, rewardPct, rrRatio,
+                    List.of(String.format(
+                            "Only %.1f%% below 52-week high — pullback invalid near resistance. " +
+                            "Only breakout trades allowed here.", pctTo52wHigh)));
+        }
+
+        // Determine final setup type (breakout takes precedence if both qualify)
+        String setupType = isBreakout ? "BREAKOUT" : "PULLBACK";
+
+        // ── Setup-specific gates ────────────────────────────────────────────────
+        List<String> setupGateFailures = new ArrayList<>();
+
+        if ("PULLBACK".equals(setupType)) {
+            // RSI must be in pullback zone (35-50)
+            if (rsi < PULLBACK_RSI_LOW || rsi > PULLBACK_RSI_HIGH) {
+                setupGateFailures.add(String.format(
+                        "Pullback RSI %.1f not in [%.0f–%.0f] range — " +
+                        (rsi < PULLBACK_RSI_LOW ? "wait for more of a pullback" : "RSI too high, momentum fading"),
+                        rsi, PULLBACK_RSI_LOW, PULLBACK_RSI_HIGH));
+            }
+            // Volume minimum
+            if (volumeRatio < VOL_PULLBACK_MIN) {
+                setupGateFailures.add(String.format(
+                        "Pullback volume %.1fx < %.1fx minimum — no institutional interest", volumeRatio, VOL_PULLBACK_MIN));
+            }
+        } else { // BREAKOUT
+            // RSI must be in breakout zone (55-65)
+            if (rsi < BREAKOUT_RSI_LOW || rsi > BREAKOUT_RSI_HIGH) {
+                setupGateFailures.add(String.format(
+                        "Breakout RSI %.1f not in [%.0f–%.0f] range — " +
+                        (rsi < BREAKOUT_RSI_LOW ? "RSI too low for a breakout" : "RSI overbought, late entry"),
+                        rsi, BREAKOUT_RSI_LOW, BREAKOUT_RSI_HIGH));
+            }
+            // Volume minimum (already checked for breakout type detection, but gate enforces)
+            if (volumeRatio < VOL_BREAKOUT_MIN) {
+                setupGateFailures.add(String.format(
+                        "Breakout volume %.1fx < %.1fx required — false breakout risk", volumeRatio, VOL_BREAKOUT_MIN));
+            }
+        }
+
+        if (!setupGateFailures.isEmpty()) {
+            return buildBlocked(symbol, sector, price, rsi, sma20, sma50, sma200, atr, atrPct,
+                    volumeRatio, niftyReturn, stockReturn, outperforms,
+                    sma50SlopePositive, higherHigh, higherLow, nearResistance,
+                    pctTo52wHigh, stopLoss, target, riskPct, rewardPct, rrRatio,
+                    setupGateFailures);
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // PHASE 3: SCORING (0–100)
+        // ══════════════════════════════════════════════════════════════════════
+        int    score      = 0;
+        List<String> conds = new ArrayList<>();
+        List<String> warns = new ArrayList<>();
+
+        // RSI quality (0-30): how well RSI fits the setup type
+        if ("PULLBACK".equals(setupType)) {
+            // Sweet spot: 38-47 (well into the pullback zone)
+            if (rsi >= 38 && rsi <= 47) {
+                score += 30;
+                conds.add(String.format("RSI %.1f in pullback sweet spot (38–47)", rsi));
+            } else {
+                score += 15;
+                conds.add(String.format("RSI %.1f in pullback zone (35–50)", rsi));
+            }
+        } else {
+            // Sweet spot: 57-63 (momentum with room to run)
+            if (rsi >= 57 && rsi <= 63) {
+                score += 30;
+                conds.add(String.format("RSI %.1f in breakout sweet spot (57–63)", rsi));
+            } else {
+                score += 15;
+                conds.add(String.format("RSI %.1f in breakout zone (55–65)", rsi));
+            }
+        }
+
+        // Volume quality (0-30)
+        double volRequired = "PULLBACK".equals(setupType) ? VOL_PULLBACK_MIN : VOL_BREAKOUT_MIN;
+        double volScore    = Math.min(30, (volumeRatio / volRequired - 1.0) * 30 + 15);
+        score += (int) Math.max(0, volScore);
+        conds.add(String.format("Volume %.1fx avg (%s)", volumeRatio, setupType.equals("BREAKOUT") ? "breakout confirmation" : "institutional interest"));
+
+        // SMA200 (0-20): long-term trend filter
+        if (sma200 != null && price > sma200) {
             score += 20;
-            conditions.add(String.format("RSI neutral (%.1f)", rsi));
+            conds.add(String.format("Price (%.2f) above SMA200 (%.2f) — long-term uptrend", price, sma200));
+        } else if (sma200 == null) {
+            score += 10;   // SMA200 not available (3mo data) — neutral
+            warns.add("SMA200 not available with 3mo data — regime detection compensates");
         } else {
+            warns.add(String.format("Price below SMA200 (%.2f) — counter-trend trade, reduce size", sma200));
+        }
+
+        // ATR quality (0-10): tighter ATR = better R:R potential
+        if (atrPct <= 2.5) {
+            score += 10;
+            conds.add(String.format("Tight ATR %.1f%% — excellent R:R", atrPct));
+        } else if (atrPct <= 4.0) {
             score += 5;
-            warnings.add(String.format("RSI elevated (%.1f) — risk of buying late", rsi));
+            conds.add(String.format("Moderate ATR %.1f%%", atrPct));
         }
 
-        // Trend quality (0-30 pts)
-        if (aboveSma20) {
-            score += 15;
-            conditions.add("Price above SMA20");
-        } else {
-            warnings.add("Price below SMA20 — wait for reclaim");
-        }
-        if (pullbackToSma20) {
-            score += 15;
-            conditions.add("Pulling back to SMA20 — ideal swing entry zone");
-        }
-
-        // Volume quality (0-20 pts)
-        if (volumeRatio >= VOLUME_STRONG) {
-            score += 20;
-            conditions.add(String.format("Strong volume (%.1fx avg) — institutional conviction", volumeRatio));
-        } else if (volumeRatio >= VOLUME_OK) {
+        // Relative strength (0-10)
+        if (outperforms) {
             score += 10;
-            conditions.add(String.format("Volume above average (%.1fx)", volumeRatio));
+            conds.add(String.format("Outperforms Nifty by +%.1f%% (20d)", stockReturn - niftyReturn));
         } else {
-            score -= 5;
-            warnings.add(String.format("Weak volume (%.1fx) — wait for confirmation", volumeRatio));
+            warns.add(String.format("Underperforms Nifty by %.1f%% (20d)", niftyReturn - stockReturn));
         }
 
-        // Stop quality / R:R (0-10 pts)
-        if (riskPct <= 4.0) {
-            score += 10;
-            conditions.add(String.format("Tight stop (%.1f%%) — excellent R:R of %.1fx", riskPct, rrRatio));
-        } else if (riskPct <= 6.0) {
-            score += 5;
-            conditions.add(String.format("Reasonable stop (%.1f%%) — R:R %.1fx", riskPct, rrRatio));
-        }
-
-        // Bonus scoring for demoted gates 6 and 8 (adds points but doesn't block)
-        if (sma50SlopePositive) {
-            score += 10;
-            conditions.add("SMA50 slope positive — weekly trend accelerating");
-        } else {
-            warnings.add("SMA50 slope flat/declining — trend not strengthening");
-        }
-        if (higherHigh && higherLow) {
-            score += 10;
-            conditions.add("Price structure: higher high + higher low confirmed");
-        } else {
-            warnings.add(String.format("Weak price structure — %s%s",
-                higherHigh ? "" : "no higher high ",
-                higherLow  ? "" : "no higher low"));
-        }
-
-        // Informational (already scored above)
-        conditions.add(String.format("Outperforms Nifty by +%.1f%% (20d)", stockReturn20d - niftyReturn20d));
-        conditions.add(String.format("Momentum: %d/%d green candles", greenCandles, MOMENTUM_BARS));
-
-        // Warn A — near 52-week high
-        if (nearResistance) {
-            warnings.add(String.format(
-                "Only %.1f%% below 52-week high (%.2f) — potential resistance overhead", pctTo52wHigh, high52w));
+        // Near resistance warning (not a gate for breakout, but still warn)
+        if (nearResistance && "BREAKOUT".equals(setupType)) {
+            warns.add(String.format("%.1f%% from 52-week high — breakout to new highs, use tight stop", pctTo52wHigh));
         }
 
         score = Math.max(0, Math.min(100, score));
 
-        // ── Verdict ───────────────────────────────────────────────────────────
+        // Verdict
         boolean isSetup;
-        String  verdict;
-        String  conviction;
-
+        String  verdict, conviction;
         if (score >= 70) {
-            isSetup = true; verdict = "STRONG SETUP"; conviction = "HIGH";
-        } else if (score >= 55) {
-            isSetup = true; verdict = "SETUP";         conviction = "MEDIUM";
+            isSetup = true; verdict = "STRONG " + setupType; conviction = "HIGH";
         } else if (score >= SETUP_MIN_SCORE) {
-            isSetup = true; verdict = "WEAK SETUP";    conviction = "LOW";
+            isSetup = true; verdict = setupType;              conviction = score >= 60 ? "MEDIUM" : "LOW";
         } else {
-            isSetup = false; verdict = "NO SETUP";     conviction = "LOW";
+            isSetup = false; verdict = "WEAK " + setupType;  conviction = "LOW";
         }
 
-        log.info("[LiveScan] {} → {} | score={} | RSI={} | vol={}x | RS=+{}% | sector={}",
+        log.info("[LiveScan] {} → {} | score={} | RSI={} | vol={}x | ATR={}% | {}",
                 symbol, verdict, score,
                 String.format("%.1f", rsi),
                 String.format("%.1f", volumeRatio),
-                String.format("%.1f", stockReturn20d - niftyReturn20d),
-                sector);
+                String.format("%.1f", atrPct),
+                setupType);
 
-        return LiveScanResult.builder()
-                .symbol(symbol)
-                .sector(sector)
-                .price(r2(price))
-                .rsi(r1(rsi))
-                .sma20(r2(sma20))
-                .sma50(r2(sma50))
-                .atr(r2(atr))
-                .volumeRatio(r2(volumeRatio))
-                .stockReturn20d(r2(stockReturn20d))
-                .niftyReturn20d(r2(niftyReturn20d))
-                .relativeStrength(r2(stockReturn20d - niftyReturn20d))
-                .sma50SlopePositive(sma50SlopePositive)
-                .uptrend(uptrend)
-                .aboveSma50(aboveSma50)
-                .aboveSma20(aboveSma20)
-                .pullbackToSma20(pullbackToSma20)
-                .higherHigh(higherHigh)
-                .higherLow(higherLow)
-                .greenCandles(greenCandles)
-                .pctTo52wHigh(r2(pctTo52wHigh))
-                .nearResistance(nearResistance)
-                .setupScore(score)
-                .isSetup(isSetup)
-                .verdict(verdict)
-                .conviction(conviction)
-                .entryLow(r2(price * 0.99))
-                .entryHigh(r2(price * 1.005))
-                .stopLoss(r2(stopLoss))
-                .target(r2(target))
-                .riskPct(r2(riskPct))
-                .rewardPct(r2(rewardPct))
-                .rrRatio(r2(rrRatio))
-                .conditions(conditions)
-                .warnings(warnings)
-                .error(false)
-                .build();
+        return buildResult(symbol, sector, price, rsi, sma20, sma50, sma200, atr, atrPct,
+                volumeRatio, niftyReturn, stockReturn, outperforms,
+                sma50SlopePositive, higherHigh, higherLow, nearResistance,
+                pctTo52wHigh, stopLoss, target, riskPct, rewardPct, rrRatio,
+                score, isSetup, verdict, conviction, setupType, conds, warns);
     }
 
-    // ── Technical helpers ─────────────────────────────────────────────────────
+    // ── Technical helpers ──────────────────────────────────────────────────────
 
-    /**
-     * Gate 6 — SMA50 slope positive.
-     * Computes SMA50 N bars ago and checks it's lower than today's SMA50.
-     * Avoids using static SMA — instead uses price average of last 50 bars
-     * at two points in time to derive slope direction.
-     */
     private boolean isSma50SlopePositive(List<Candle> candles, int last) {
         int prev = last - SMA50_SLOPE_BARS;
         if (prev < 50) return false;
-        Double sma50Now  = SMAIndicator.calculate(candles, last, 50);
-        Double sma50Prev = SMAIndicator.calculate(candles, prev, 50);
-        if (sma50Now == null || sma50Prev == null) return false;
-        return sma50Now > sma50Prev;
+        Double now = SMAIndicator.calculate(candles, last, 50);
+        Double old = SMAIndicator.calculate(candles, prev, 50);
+        return now != null && old != null && now > old;
     }
 
-    /**
-     * Gate 7 — Stock return over N bars.
-     * Used to compare against Nifty benchmark return.
-     */
+    private boolean hasHigherHigh(List<Candle> candles, int last, int bars) {
+        if (last < bars + 1) return false;
+        double prevHigh   = candles.subList(last - bars, last - bars / 2)
+                .stream().mapToDouble(Candle::getHigh).max().orElse(0);
+        double recentHigh = candles.subList(last - bars / 2, last + 1)
+                .stream().mapToDouble(Candle::getHigh).max().orElse(0);
+        return recentHigh > prevHigh;
+    }
+
+    private boolean hasHigherLow(List<Candle> candles, int last, int bars) {
+        if (last < bars + 1) return false;
+        double prevLow   = candles.subList(last - bars, last - bars / 2)
+                .stream().mapToDouble(Candle::getLow).min().orElse(Double.MAX_VALUE);
+        double recentLow = candles.subList(last - bars / 2, last + 1)
+                .stream().mapToDouble(Candle::getLow).min().orElse(Double.MAX_VALUE);
+        return recentLow > prevLow;
+    }
+
     private double computeReturn(List<Candle> candles, int last, int bars) {
         if (last < bars) return 0;
         double then = candles.get(last - bars).getClose();
@@ -464,74 +543,44 @@ public class LiveScanService {
         return then > 0 ? ((now - then) / then) * 100 : 0;
     }
 
-    /**
-     * Gate 8 — Higher high.
-     * Checks if the current bar's high is above the highest high of the
-     * prior N bars (excluding the current bar).
-     */
-    private boolean hasHigherHigh(List<Candle> candles, int last, int bars) {
-        if (last < bars + 1) return false;
-        double prevHigh = candles.subList(last - bars, last).stream()
-                .mapToDouble(Candle::getHigh).max().orElse(Double.MAX_VALUE);
-        // Recent high within last 3 bars must exceed previous period's high
-        double recentHigh = candles.subList(Math.max(0, last - 3), last + 1).stream()
-                .mapToDouble(Candle::getHigh).max().orElse(0);
-        return recentHigh > prevHigh;
-    }
-
-    /**
-     * Gate 8 — Higher low.
-     * Checks if the most recent significant low is above the prior period's low.
-     */
-    private boolean hasHigherLow(List<Candle> candles, int last, int bars) {
-        if (last < bars + 1) return false;
-        double prevLow = candles.subList(last - bars, last - bars / 2).stream()
-                .mapToDouble(Candle::getLow).min().orElse(0);
-        double recentLow = candles.subList(last - bars / 2, last + 1).stream()
-                .mapToDouble(Candle::getLow).min().orElse(Double.MAX_VALUE);
-        return recentLow > prevLow;
-    }
-
-    /**
-     * Gate 9 — Count green candles (close > open) in last N bars.
-     */
-    private int countGreenCandles(List<Candle> candles, int last, int bars) {
-        int start = Math.max(0, last - bars + 1);
-        return (int) candles.subList(start, last + 1).stream()
-                .filter(c -> c.getClose() > c.getOpen())
-                .count();
-    }
-
-    /**
-     * Fetch the Nifty 50 benchmark 20-day return using NIFTYBEES ETF.
-     * Falls back to 0 if unavailable (stock still needs RS ≥ 0).
-     */
     private double fetchBenchmarkReturn() {
         try {
-            List<Candle> nifty = marketDataClient.fetchCandles(NIFTY_PROXY, DATA_PERIOD, "NS");
-            if (nifty != null && nifty.size() >= RS_LOOKBACK_BARS + 1) {
-                int last = nifty.size() - 1;
-                return computeReturn(nifty, last, RS_LOOKBACK_BARS);
-            }
+            List<Candle> c = marketDataClient.fetchCandles(NIFTY_PROXY, DATA_PERIOD, "NS");
+            if (c != null && c.size() > RS_LOOKBACK_BARS)
+                return computeReturn(c, c.size() - 1, RS_LOOKBACK_BARS);
         } catch (Exception e) {
-            log.warn("[LiveScan] Could not fetch Nifty benchmark ({}), using 0%", e.getMessage());
+            log.warn("[LiveScan] Benchmark fetch failed: {}", e.getMessage());
         }
-        return 0.0;
+        return 0;
     }
 
-    // ── Builder helpers ───────────────────────────────────────────────────────
+    // ── Result builders ────────────────────────────────────────────────────────
 
     private LiveScanResult buildBlocked(
             String symbol, String sector, double price,
-            double rsi, double sma20, double sma50, double atr,
-            double volumeRatio, boolean uptrend, boolean aboveSma50,
-            boolean aboveSma20, boolean pullbackToSma20,
-            double stopLoss, double target, double riskPct,
-            double rewardPct, double rrRatio,
-            double stockReturn, double pctTo52wHigh,
-            int greenCandles, boolean sma50Slope,
-            boolean outperforms, boolean hh, boolean hl,
-            List<String> gateFailures) {
+            double rsi, double sma20, double sma50, Double sma200,
+            double atr, double atrPct, double volumeRatio,
+            double niftyReturn, double stockReturn, boolean outperforms,
+            boolean sma50Slope, boolean hh, boolean hl, boolean nearRes,
+            double pctTo52w, double stop, double target,
+            double riskPct, double rewardPct, double rr,
+            List<String> reasons) {
+        return buildResult(symbol, sector, price, rsi, sma20, sma50, sma200, atr, atrPct,
+                volumeRatio, niftyReturn, stockReturn, outperforms,
+                sma50Slope, hh, hl, nearRes, pctTo52w, stop, target, riskPct, rewardPct, rr,
+                0, false, "BLOCKED", "LOW", "BLOCKED", List.of(), reasons);
+    }
+
+    private LiveScanResult buildResult(
+            String symbol, String sector, double price,
+            double rsi, double sma20, double sma50, Double sma200,
+            double atr, double atrPct, double volumeRatio,
+            double niftyReturn, double stockReturn, boolean outperforms,
+            boolean sma50Slope, boolean hh, boolean hl, boolean nearRes,
+            double pctTo52w, double stop, double target,
+            double riskPct, double rewardPct, double rr,
+            int score, boolean isSetup, String verdict, String conviction, String setupType,
+            List<String> conditions, List<String> warnings) {
 
         return LiveScanResult.builder()
                 .symbol(symbol)
@@ -540,28 +589,35 @@ public class LiveScanService {
                 .rsi(r1(rsi))
                 .sma20(r2(sma20))
                 .sma50(r2(sma50))
+                .sma200(sma200 != null ? r2(sma200) : null)
                 .atr(r2(atr))
+                .atrPct(r1(atrPct))
                 .volumeRatio(r2(volumeRatio))
-                .uptrend(uptrend)
-                .aboveSma50(aboveSma50)
-                .aboveSma20(aboveSma20)
-                .pullbackToSma20(pullbackToSma20)
+                .stockReturn20d(r2(stockReturn))
+                .niftyReturn20d(r2(niftyReturn))
+                .relativeStrength(r2(stockReturn - niftyReturn))
                 .sma50SlopePositive(sma50Slope)
+                .aboveSma50(price > sma50)
+                .aboveSma20(price > sma20)
+                .aboveSma200(sma200 != null && price > sma200)
                 .higherHigh(hh)
                 .higherLow(hl)
-                .greenCandles(greenCandles)
-                .pctTo52wHigh(r2(pctTo52wHigh))
-                .stopLoss(r2(stopLoss))
+                .nearResistance(nearRes)
+                .pctTo52wHigh(r2(pctTo52w))
+                .setupType(setupType)
+                .setupScore(score)
+                .isSetup(isSetup)
+                .verdict(verdict)
+                .conviction(conviction)
+                .entryLow(r2(price * 0.99))
+                .entryHigh(r2(price * 1.005))
+                .stopLoss(r2(stop))
                 .target(r2(target))
                 .riskPct(r2(riskPct))
                 .rewardPct(r2(rewardPct))
-                .rrRatio(r2(rrRatio))
-                .setupScore(0)
-                .isSetup(false)
-                .verdict("BLOCKED")
-                .conviction("LOW")
-                .conditions(List.of())
-                .warnings(gateFailures)
+                .rrRatio(r2(rr))
+                .conditions(conditions)
+                .warnings(warnings)
                 .error(false)
                 .build();
     }

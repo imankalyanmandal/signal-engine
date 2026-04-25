@@ -11,10 +11,5 @@ public class SignalEngineApplication {
 	public static void main(String[] args) {
 		SpringApplication.run(SignalEngineApplication.class, args);
 	}
-	
-	@Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate();
-    }
 
 }

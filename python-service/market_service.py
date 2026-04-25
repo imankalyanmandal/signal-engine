@@ -33,6 +33,10 @@ from sentiment_analyser    import fetch_sentiment
 from concall_analyser      import fetch_concall_analysis
 from composite_scorer      import compute_composite_score, get_company_name
 from symbol_provider       import get_symbols, to_yahoo_ticker
+from cache                 import (get_candles as cache_get_candles,
+                                   set_candles as cache_set_candles,
+                                   invalidate_symbols, invalidate_candles,
+                                   cache as _cache)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -66,8 +70,22 @@ def get_candles():
     if exchange not in VALID_EXCHANGES:
         return jsonify({"error": "exchange must be NS (NSE) or BO (BSE)"}), 400
 
+    # ── Cache check (4-hour TTL) ──────────────────────────────────────────────
+    cache_key = f"{symbol}_{exchange}"
+    cached = cache_get_candles(cache_key, period)
+    if cached:
+        print(f"  [Cache HIT] {symbol}.{exchange} {period} ({len(cached)} bars)")
+        return jsonify(cached)
+
+    # ── Fetch from Yahoo Finance and cache result ──────────────────────────────
     ticker = to_yahoo_ticker(symbol, exchange)
-    return _fetch_candles_with_retry(symbol, ticker, period)
+    resp   = _fetch_candles_with_retry(symbol, ticker, period)
+
+    if resp.status_code == 200:
+        import json as _json
+        cache_set_candles(cache_key, period, _json.loads(resp.get_data(as_text=True)))
+
+    return resp
 
 
 @app.route("/health")
@@ -270,6 +288,45 @@ def _parse_layer1_params(args) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ── Cache management endpoints ────────────────────────────────────────────────
+
+@app.route("/cache/status")
+def cache_status():
+    """GET /cache/status — show cache stats and all cached keys."""
+    return jsonify({
+        "stats": _cache.stats(),
+        "keys":  _cache.keys_info(),
+    })
+
+@app.route("/cache/invalidate/symbols", methods=["POST"])
+def invalidate_symbols_endpoint():
+    """POST /cache/invalidate/symbols?index=NIFTY+50 — force symbol list refresh."""
+    index   = request.args.get("index")
+    deleted = invalidate_symbols(index)
+    return jsonify({
+        "status":  "ok",
+        "deleted": deleted,
+        "message": f"Symbol cache cleared for {'index=' + index if index else 'ALL indices'}",
+    })
+
+@app.route("/cache/invalidate/candles", methods=["POST"])
+def invalidate_candles_endpoint():
+    """POST /cache/invalidate/candles?symbol=HDFCBANK — force candle data refresh."""
+    symbol  = request.args.get("symbol")
+    deleted = invalidate_candles(symbol)
+    return jsonify({
+        "status":  "ok",
+        "deleted": deleted,
+        "message": f"Candle cache cleared for {'symbol=' + symbol if symbol else 'ALL symbols'}",
+    })
+
+@app.route("/cache/invalidate/all", methods=["POST"])
+def invalidate_all():
+    """POST /cache/invalidate/all — clear entire cache."""
+    count = _cache.clear_all()
+    return jsonify({"status": "ok", "deleted": count, "message": "Cache fully cleared"})
+
 
 if __name__ == "__main__":
     print("\n=== Signal Engine Market Service ===")

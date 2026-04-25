@@ -170,6 +170,9 @@ public class MarketDataClient {
         }
     }
 
+    /** Exposes the Python service URL for cache management endpoints. */
+    public String getDataServiceUrl() { return dataServiceUrl; }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private double toDouble(Object val) {

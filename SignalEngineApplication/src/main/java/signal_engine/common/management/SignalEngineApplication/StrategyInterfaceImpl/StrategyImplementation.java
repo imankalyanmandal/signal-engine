@@ -1,143 +1,224 @@
 package signal_engine.common.management.SignalEngineApplication.StrategyInterfaceImpl;
 
-import java.util.List;
-
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-
 import signal_engine.common.management.SignalEngineApplication.Indicators.ATRIndicator;
+import signal_engine.common.management.SignalEngineApplication.Indicators.BollingerBandsIndicator;
 import signal_engine.common.management.SignalEngineApplication.Indicators.RSIIndicator;
 import signal_engine.common.management.SignalEngineApplication.Indicators.SMAIndicator;
 import signal_engine.common.management.SignalEngineApplication.StrategyInterface.Strategy;
 import signal_engine.common.management.SignalEngineApplication.model.Candle;
 
+import java.util.List;
+
 /**
- * Multi-mode swing trading strategy.
+ * Upgraded swing trading strategy — multi-signal confirmation.
  *
- * Three BUY modes cover different market regimes so the strategy
- * generates meaningful signals in both uptrending and downtrending markets.
+ * ── BUY CONDITIONS (any one pathway triggers BUY) ───────────────────────────
  *
- * All modes share two gatekeeping filters:
- *   1. Volume confirmation — current volume must be above 20-day average.
- *      Low-volume signals are far more likely to be false.
- *   2. Not making fresh lows — price must not be breaking below the
- *      prior 3 candles' lows. Avoids catching a falling knife.
+ *  Pathway 1 — RSI Oversold + SMA200 trend filter
+ *    RSI < 30  AND  price > SMA200
+ *    → Oversold but in a long-term uptrend (buy the dip, not a falling knife)
+ *    → Volume must be ≥ 1.5× 20-day average (institutional confirmation)
  *
- * ATR is calculated and passed to BacktestService via a thread-local
- * so the service can set dynamic stop-losses without coupling to strategy internals.
+ *  Pathway 2 — Golden Cross + Volume Spike + ATR Rising
+ *    SMA20 crosses above SMA50 (this bar) AND volume > 1.5× avg AND ATR rising
+ *    → A fresh golden cross with volume and expanding volatility = high momentum entry
+ *    → ATR rising means the breakout has energy behind it
+ *
+ *  Pathway 3 — Bollinger Band Squeeze + Breakout
+ *    Band squeeze detected (bandwidth < 5% of price for last 5 bars) AND
+ *    price closes above upper band (breakout from squeeze)
+ *    → Contraction followed by expansion = reliable breakout signal
+ *    → Volume must confirm: > 1.5× average
+ *
+ * ── SELL CONDITIONS (any one pathway triggers SELL) ─────────────────────────
+ *
+ *  Pathway A — RSI Overbought + Below SMA200
+ *    RSI > 70  AND  price < SMA200
+ *    → Technically extended and losing long-term support
+ *
+ *  Pathway B — Death Cross
+ *    SMA20 crosses below SMA50 (this bar)
+ *    → Trend reversal confirmed
+ *
+ *  Pathway C — Price breaks below SMA20 with weak momentum
+ *    price < SMA20 AND RSI < 50 AND volume > 1.0× avg
+ *    → Lost short-term support with momentum fading
+ *
+ * ── VOLUME FILTER ────────────────────────────────────────────────────────────
+ *  All BUY signals require volume > 1.5× 20-day average.
+ *  SELL signals require volume > 1.0× average (lower threshold — exits are easier).
+ *
+ * ── WARMUP REQUIREMENTS ──────────────────────────────────────────────────────
+ *  SMA200 needs 200 bars → need at least 200 candles in backtest data.
+ *  Use period=2y or period=5y for backtest. 3mo live scan uses pathway 2+3 only.
  */
 @Component
 public class StrategyImplementation implements Strategy {
 
-    // Periods
-    private static final int RSI_PERIOD    = 14;
-    private static final int SMA_FAST      = 20;
-    private static final int SMA_SLOW      = 50;
-    private static final int ATR_PERIOD    = 14;
-    private static final int VOLUME_PERIOD = 20;
+    // ── Thresholds (configurable via application.properties) ──────────────────
 
-    // Volume filter: signal only when volume >= this multiple of average
-    private static final double VOLUME_THRESHOLD = 1.0; // at or above average
+    @Value("${strategy.rsi.oversold:30}")
+    private double RSI_OVERSOLD;
 
-    // ATR: exposed so BacktestService can use it for dynamic stop calculation
+    @Value("${strategy.rsi.overbought:70}")
+    private double RSI_OVERBOUGHT;
+
+    @Value("${strategy.volume.buy.multiplier:1.5}")
+    private double VOLUME_BUY_MULT;        // BUY needs volume > 1.5× avg
+
+    @Value("${strategy.volume.sell.multiplier:1.0}")
+    private double VOLUME_SELL_MULT;       // SELL needs volume > 1.0× avg
+
+    @Value("${strategy.bb.squeeze.threshold:0.05}")
+    private double BB_SQUEEZE_THRESHOLD;   // bandwidth < 5% of price = squeeze
+
+    @Value("${strategy.bb.squeeze.bars:5}")
+    private int BB_SQUEEZE_BARS;           // how many bars to check for squeeze
+
+    @Value("${strategy.atr.rising.bars:3}")
+    private int ATR_RISING_BARS;           // ATR must be higher than N bars ago
+
+    // Expose current ATR for BacktestService to use in stop calculation
     public static final ThreadLocal<Double> currentATR = new ThreadLocal<>();
+
+    // ── Main signal generation ─────────────────────────────────────────────────
 
     @Override
     public String generateSignal(List<Candle> candles, int index) {
 
-        // ── 1. Compute all indicators ─────────────────────────────────────
-        Double rsi   = RSIIndicator.calculate(candles, index, RSI_PERIOD);
-        Double sma20 = SMAIndicator.calculate(candles, index, SMA_FAST);
-        Double sma50 = SMAIndicator.calculate(candles, index, SMA_SLOW);
-        Double atr   = ATRIndicator.calculate(candles, index, ATR_PERIOD);
-        Double volSma = SMAIndicator.calculateVolumeSMA(candles, index, VOLUME_PERIOD);
+        // ── 1. Compute all indicators ──────────────────────────────────────────
+        Double rsi    = RSIIndicator.calculate(candles, index, 14);
+        Double sma20  = SMAIndicator.calculate(candles, index, 20);
+        Double sma50  = SMAIndicator.calculate(candles, index, 50);
+        Double sma200 = SMAIndicator.calculate(candles, index, 200);
+        Double atr    = ATRIndicator.calculate(candles, index, 14);
+        Double[] bb   = BollingerBandsIndicator.calculate(candles, index, 20, 2.0);
 
-        // Publish ATR so BacktestService can read it for dynamic stop-loss
+        // Store ATR for BacktestService stop-loss calculation
         currentATR.set(atr);
 
-        // ── 2. Warmup guard ───────────────────────────────────────────────
+        double price = candles.get(index).getClose();
+
+        // Minimum warmup: RSI(14) + SMA(50) must be ready
         if (rsi == null || sma20 == null || sma50 == null) return "HOLD";
 
-        double price  = candles.get(index).getClose();
-        double volume = candles.get(index).getVolume();
+        // ── 2. Volume vs 20-day average ────────────────────────────────────────
+        double volumeRatio = computeVolumeRatio(candles, index, 20);
 
-        // ── 3. Shared entry gates (both modes must pass these) ────────────
+        // ── 3. Previous bar indicators (for crossover detection) ───────────────
+        Double prevSma20 = index > 0 ? SMAIndicator.calculate(candles, index - 1, 20) : null;
+        Double prevSma50 = index > 0 ? SMAIndicator.calculate(candles, index - 1, 50) : null;
 
-        // Gate A: Volume confirmation — skip low-volume signals
-        boolean volumeOk = volSma == null || volume >= volSma * VOLUME_THRESHOLD;
+        // ── 4. ATR trend ────────────────────────────────────────────────────────
+        boolean atrRising = isAtrRising(candles, index);
 
-        // Gate B: Not making fresh lows (avoid catching falling knife)
-        boolean notFreshLow = true;
-        if (index >= 3) {
-            double low3 = Math.min(candles.get(index - 1).getLow(),
-                         Math.min(candles.get(index - 2).getLow(),
-                                  candles.get(index - 3).getLow()));
-            notFreshLow = price >= low3;
-        }
+        // ── 5. Bollinger Band states ───────────────────────────────────────────
+        boolean bbSqueeze   = isBollingerSqueeze(candles, index);
+        boolean bbBreakout  = (bb != null && price > bb[2]); // close above upper band
+        boolean bbLowerTouch = (bb != null && price < bb[0]); // at or below lower band
 
-        // ── 4. Trend regime ───────────────────────────────────────────────
-        boolean uptrend   = sma20 > sma50;
-        boolean downtrend = sma20 < sma50;
+        // ═══════════════════════════════════════════════════════════════════════
+        // BUY PATHWAYS
+        // ═══════════════════════════════════════════════════════════════════════
 
-        // SMA20 slope: compare today vs 5 bars ago
-        boolean sma20Rising  = false;
-        boolean sma20Falling = false;
-        if (index >= 5) {
-            Double sma20prev = SMAIndicator.calculate(candles, index - 5, SMA_FAST);
-            if (sma20prev != null) {
-                sma20Rising  = sma20 > sma20prev;
-                sma20Falling = sma20 < sma20prev;
-            }
-        }
-
-        // ── 5. BUY logic ──────────────────────────────────────────────────
-
-        // Mode 1: Uptrend pullback
-        //   Stock is in uptrend (sma20 > sma50, sma20 rising),
-        //   price has dipped below sma20 (pullback), RSI is oversold.
-        //   Classic "buy the dip in an uptrend" setup.
-        boolean uptrendPullback = uptrend
-                && sma20Rising
-                && rsi < 40
-                && price < sma20
-                && volumeOk
-                && notFreshLow;
-
-        // Mode 2: Extreme mean reversion in downtrend
-        //   Stock is oversold to an extreme degree (RSI < 28),
-        //   SMA20 has stopped falling (stabilising), not making new lows.
-        //   Short counter-trend bounce trades only — strict conditions.
-        boolean meanReversion = downtrend
-                && !sma20Falling
-                && rsi < 28
-                && volumeOk
-                && notFreshLow;
-
-        // Mode 3: SMA20 crossover resumption
-        //   Price was below SMA20 yesterday, is crossing back above today.
-        //   Signals trend resumption after a brief dip. RSI must be neutral
-        //   (40-60) — not overbought entry.
-        boolean crossAbove = uptrend
-                && price > sma20
-                && index >= 1
-                && candles.get(index - 1).getClose() < sma20
-                && rsi > 40 && rsi < 60
-                && volumeOk;
-
-        if (uptrendPullback || meanReversion || crossAbove) {
+        // Pathway 1: RSI oversold + SMA200 trend + volume confirmation
+        if (rsi < RSI_OVERSOLD && sma200 != null && price > sma200
+                && volumeRatio >= VOLUME_BUY_MULT) {
             return "BUY";
         }
 
-        // ── 6. SELL logic ─────────────────────────────────────────────────
+        // Pathway 1b: RSI oversold + at Bollinger lower band (no SMA200 needed — works with 3mo data)
+        if (rsi < RSI_OVERSOLD && bbLowerTouch && volumeRatio >= VOLUME_BUY_MULT) {
+            return "BUY";
+        }
 
-        // Take profit: overbought
-        if (rsi > 70) return "SELL";
+        // Pathway 2: Fresh Golden Cross + volume spike + ATR rising
+        if (prevSma20 != null && prevSma50 != null
+                && prevSma20 <= prevSma50   // previous: SMA20 was below SMA50
+                && sma20 > sma50            // current:  SMA20 crossed above SMA50
+                && volumeRatio >= VOLUME_BUY_MULT
+                && atrRising) {
+            return "BUY";
+        }
 
-        // Trend exit: below SMA20 + weakening momentum + SMA20 falling
-        if (price < sma20 && rsi < 50 && sma20Falling) return "SELL";
+        // Pathway 3: Bollinger Band squeeze breakout
+        if (bbSqueeze && bbBreakout && volumeRatio >= VOLUME_BUY_MULT) {
+            return "BUY";
+        }
 
-        // Downtrend confirmed: both MAs aligned down, price below both
-        if (downtrend && price < sma20 && rsi < 45) return "SELL";
+        // ═══════════════════════════════════════════════════════════════════════
+        // SELL PATHWAYS
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // Pathway A: RSI overbought + below SMA200 (extended AND losing LT support)
+        if (rsi > RSI_OVERBOUGHT && sma200 != null && price < sma200
+                && volumeRatio >= VOLUME_SELL_MULT) {
+            return "SELL";
+        }
+
+        // Pathway A2: RSI overbought alone (SMA200 not required — works with 3mo data)
+        if (rsi > RSI_OVERBOUGHT && volumeRatio >= VOLUME_SELL_MULT) {
+            return "SELL";
+        }
+
+        // Pathway B: Fresh Death Cross
+        if (prevSma20 != null && prevSma50 != null
+                && prevSma20 >= prevSma50   // previous: SMA20 was above SMA50
+                && sma20 < sma50) {         // current:  SMA20 crossed below SMA50
+            return "SELL";
+        }
+
+        // Pathway C: Below SMA20 + weak momentum + volume confirms selling
+        if (price < sma20 && rsi < 50 && volumeRatio >= VOLUME_SELL_MULT) {
+            return "SELL";
+        }
 
         return "HOLD";
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Volume ratio = today's volume / 20-day average volume.
+     * Returns 0 if insufficient data.
+     */
+    private double computeVolumeRatio(List<Candle> candles, int index, int period) {
+        if (index < period) return 0;
+        double avgVolume = 0;
+        for (int i = index - period; i < index; i++) {    // average excludes today
+            avgVolume += candles.get(i).getVolume();
+        }
+        avgVolume /= period;
+        if (avgVolume == 0) return 0;
+        return candles.get(index).getVolume() / avgVolume;
+    }
+
+    /**
+     * ATR rising = current ATR > ATR N bars ago.
+     * Expanding ATR means the move has momentum/energy behind it.
+     */
+    private boolean isAtrRising(List<Candle> candles, int index) {
+        if (index < ATR_RISING_BARS + 14) return false;
+        Double atrNow  = ATRIndicator.calculate(candles, index, 14);
+        Double atrPrev = ATRIndicator.calculate(candles, index - ATR_RISING_BARS, 14);
+        return atrNow != null && atrPrev != null && atrNow > atrPrev;
+    }
+
+    /**
+     * Bollinger Band squeeze = bandwidth has been narrow for the last N bars.
+     * Bandwidth = (upperBand - lowerBand) / middleBand.
+     * Squeeze = bandwidth < threshold for all N bars.
+     */
+    private boolean isBollingerSqueeze(List<Candle> candles, int index) {
+        if (index < BB_SQUEEZE_BARS + 20) return false;
+        for (int i = index - BB_SQUEEZE_BARS; i <= index; i++) {
+            Double[] bands = BollingerBandsIndicator.calculate(candles, i, 20, 2.0);
+            if (bands == null || bands[1] == 0) return false;
+            double bandwidth = (bands[2] - bands[0]) / bands[1];
+            if (bandwidth >= BB_SQUEEZE_THRESHOLD) return false; // too wide — not a squeeze
+        }
+        return true; // all N bars had narrow bandwidth
     }
 }
