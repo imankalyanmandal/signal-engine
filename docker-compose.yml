@@ -34,6 +34,12 @@ services:
       - MARKET_DATA_SERVICE_URL=http://python-service:5000
       # SQLite DB stored in a volume so data persists across restarts
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/signal_engine.db
+      - EMAIL_ENABLED=${EMAIL_ENABLED}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - EMAIL_TO=${EMAIL_TO}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+      - EMAIL_SMTP_HOST=${EMAIL_SMTP_HOST}
+      - EMAIL_SMTP_PORT=${EMAIL_SMTP_PORT}
     volumes:
       - signal-db:/data
     depends_on:

@@ -94,6 +94,8 @@ public class EmailService {
      * Called from SystemLifecycleListener on ApplicationReadyEvent.
      */
     public void sendStartupEmail() {
+        log.info("Email config: enabled={}, from={}, to={}, password={}, smtpHost={}, smtpPort={}",
+                enabled, from, to, password != null ? "***" : null, smtpHost, smtpPort);
         if (!enabled || from.isBlank() || to.isBlank() || password.isBlank()) return;
         try {
             String time = java.time.LocalDateTime.now()
