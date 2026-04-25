@@ -152,6 +152,55 @@ public class LiveScanService {
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
+    /**
+     * Scan a pre-filtered list of symbols directly.
+     * Used by DailyScanScheduler to avoid re-fetching symbols already scanned
+     * in a higher-priority index.
+     */
+    public List<LiveScanResult> scanSymbols(
+            List<String> symbols,
+            MarketRegime regime,
+            ScanStrictness strictness,
+            String indexLabel
+    ) {
+        log.info("[LiveScan] scanSymbols — {} symbols from {}", symbols.size(), indexLabel);
+
+        double niftyReturn = fetchBenchmarkReturn();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(
+                        Math.min(symbols.size(), MAX_THREADS));
+
+        List<java.util.concurrent.Future<LiveScanResult>> futures = new java.util.ArrayList<>();
+        for (String symbol : symbols) {
+            futures.add(executor.submit(() -> {
+                try {
+                    Thread.sleep((long)(Math.random() * 500));
+                    return analyseOne(symbol, niftyReturn, regime, strictness);
+                } catch (Exception e) {
+                    log.warn("[LiveScan] {} error: {}", symbol, e.getMessage());
+                    return LiveScanResult.error(symbol, e.getMessage());
+                }
+            }));
+        }
+
+        List<LiveScanResult> results = new java.util.ArrayList<>();
+        for (java.util.concurrent.Future<LiveScanResult> future : futures) {
+            try {
+                results.add(future.get(30, java.util.concurrent.TimeUnit.SECONDS));
+            } catch (Exception e) {
+                log.warn("[LiveScan] Task failed: {}", e.getMessage());
+            }
+        }
+        executor.shutdown();
+
+        // Return only valid setups, sorted by score
+        return results.stream()
+                .filter(r -> !r.isError() && r.isSetup())
+                .sorted(java.util.Comparator.comparingInt(LiveScanResult::getSetupScore).reversed())
+                .collect(java.util.stream.Collectors.toList());
+    }
+
     public List<LiveScanResult> scan(String index, int topN) {
         return scan(index, topN, null, ScanStrictness.MODERATE);
     }
@@ -255,10 +304,10 @@ public class LiveScanService {
         double price = candles.get(last).getClose();
 
         // ── Indicators ─────────────────────────────────────────────────────────
-        Double rsi    = RSIIndicator.calculateImproved(candles, last, 14);
-        Double sma20  = SMAIndicator.calculateImproved(candles, last, 20);
-        Double sma50  = SMAIndicator.calculateImproved(candles, last, 50);
-        Double sma200 = SMAIndicator.calculateImproved(candles, last, 200);
+        Double rsi    = RSIIndicator.calculate(candles, last, 14);
+        Double sma20  = SMAIndicator.calculate(candles, last, 20);
+        Double sma50  = SMAIndicator.calculate(candles, last, 50);
+        Double sma200 = SMAIndicator.calculate(candles, last, 200);
         Double atr    = ATRIndicator.calculate(candles, last, 14);
 
         if (rsi == null || sma20 == null || sma50 == null || atr == null) {
@@ -358,7 +407,7 @@ public class LiveScanService {
         // PHASE 2: SETUP TYPE DETECTION
         // ══════════════════════════════════════════════════════════════════════
         boolean isPullback = Math.abs(price - sma20) / sma20 <= strictness.pullbackBand;
-        boolean isBreakout = price > recentHigh && volumeRatio >= strictness.strictness.volBreakoutMin;
+        boolean isBreakout = price > recentHigh && volumeRatio >= strictness.volBreakoutMin;
 
         // No valid setup type
         if (!isPullback && !isBreakout) {
@@ -396,7 +445,7 @@ public class LiveScanService {
                         rsi, strictness.pullbackRsiLow, strictness.pullbackRsiHigh));
             }
             // Volume minimum
-            if (volumeRatio < strictness.strictness.volPullbackMin) {
+            if (volumeRatio < strictness.volPullbackMin) {
                 setupGateFailures.add(String.format(
                         "Pullback volume %.1fx < %.1fx minimum — no institutional interest", volumeRatio, VOL_PULLBACK_MIN));
             }
@@ -409,7 +458,7 @@ public class LiveScanService {
                         rsi, strictness.breakoutRsiLow, strictness.breakoutRsiHigh));
             }
             // Volume minimum (already checked for breakout type detection, but gate enforces)
-            if (volumeRatio < strictness.strictness.volBreakoutMin) {
+            if (volumeRatio < strictness.volBreakoutMin) {
                 setupGateFailures.add(String.format(
                         "Breakout volume %.1fx < %.1fx required — false breakout risk", volumeRatio, VOL_BREAKOUT_MIN));
             }
@@ -522,8 +571,8 @@ public class LiveScanService {
     private boolean isSma50SlopePositive(List<Candle> candles, int last) {
         int prev = last - SMA50_SLOPE_BARS;
         if (prev < 50) return false;
-        Double now = SMAIndicator.calculateImproved(candles, last, 50);
-        Double old = SMAIndicator.calculateImproved(candles, prev, 50);
+        Double now = SMAIndicator.calculate(candles, last, 50);
+        Double old = SMAIndicator.calculate(candles, prev, 50);
         return now != null && old != null && now > old;
     }
 

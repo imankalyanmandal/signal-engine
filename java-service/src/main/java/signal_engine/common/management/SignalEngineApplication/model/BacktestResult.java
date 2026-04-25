@@ -2,7 +2,6 @@ package signal_engine.common.management.SignalEngineApplication.model;
 
 import java.util.List;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Builder;
 import lombok.Data;
 import lombok.Getter;

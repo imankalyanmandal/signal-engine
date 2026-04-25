@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import lombok.RequiredArgsConstructor;
+import signal_engine.common.management.SignalEngineApplication.Service.DailyScanScheduler;
 import signal_engine.common.management.SignalEngineApplication.Service.LiveScanService;
 import signal_engine.common.management.SignalEngineApplication.Service.MarketRegimeService;
 import signal_engine.common.management.SignalEngineApplication.model.LiveScanResult;
@@ -31,6 +32,7 @@ import signal_engine.common.management.SignalEngineApplication.model.ScanStrictn
 public class LiveScanController {
 
     private final LiveScanService       liveScanService;
+    private final DailyScanScheduler    dailyScanScheduler;
     private final MarketRegimeService   marketRegimeService;
     private final signal_engine.common.management.SignalEngineApplication.Service.MarketDataClient marketDataClient;
 
@@ -44,6 +46,22 @@ public class LiveScanController {
         try {
             MarketRegime r = marketRegimeService.analyse();
             return ResponseEntity.ok(r);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body(e.getMessage());
+        }
+    }
+
+    // ── Manual trigger for daily scan (for testing) ──────────────────────────
+    //
+    // POST /api/v1/live/scan/trigger
+    // Runs the same logic as the 9pm scheduler immediately.
+    // Use to test email without waiting for the scheduled time.
+    //
+    @org.springframework.web.bind.annotation.PostMapping("/scan/trigger")
+    public ResponseEntity<?> triggerScan() {
+        try {
+            dailyScanScheduler.runDailyScan();
+            return ResponseEntity.ok(Map.of("message", "Daily scan triggered — check logs and email"));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(e.getMessage());
         }
