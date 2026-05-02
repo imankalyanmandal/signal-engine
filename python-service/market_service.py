@@ -31,6 +31,7 @@ from claude_config         import is_mock
 from fundamentals_fetcher  import fetch_fundamentals
 from sentiment_analyser    import fetch_sentiment
 from concall_analyser      import fetch_concall_analysis
+from concall_store         import get_history, search_similar, store_stats
 from composite_scorer      import compute_composite_score, get_company_name
 from symbol_provider       import get_symbols, to_yahoo_ticker
 from cache                 import (get_candles as cache_get_candles,
@@ -107,6 +108,7 @@ def health():
         "mock_mode": is_mock(),
         "layers":    ["layer1_candles", "layer2_fundamental_sentiment_concall"],
         "providers": check_providers(),
+        "rag_store": store_stats(),
     })
 
 
@@ -143,6 +145,57 @@ def get_index_symbols():
         "index":   index,
         "count":   len(symbols),
         "symbols": symbols,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RAG — concall history and semantic search
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/concalls/history")
+def concall_history():
+    """
+    GET /concalls/history?symbol=HDFCBANK
+    GET /concalls/history?symbol=HDFCBANK&n=8
+
+    Returns the last N stored concall analyses for a symbol, newest first.
+    Each record includes quarter_label, tone, guidance_change, swing_signal,
+    summary, key_positives, key_risks, filing_date, source.
+    """
+    symbol = request.args.get("symbol", "").strip().upper()
+    n      = int(request.args.get("n", 6))
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    history = get_history(symbol, n=n)
+    return jsonify({
+        "symbol":  symbol,
+        "count":   len(history),
+        "records": history,
+    })
+
+
+@app.route("/concalls/search")
+def concall_search():
+    """
+    GET /concalls/search?symbol=HDFCBANK&q=margin+pressure
+
+    Semantic search over stored concall embeddings.
+    Returns the most similar past quarters to the query text.
+    Requires ChromaDB + sentence-transformers to be installed.
+    """
+    symbol = request.args.get("symbol", "").strip().upper()
+    query  = request.args.get("q", "").strip()
+    n      = int(request.args.get("n", 3))
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    if not query:
+        return jsonify({"error": "q (query) is required"}), 400
+    results = search_similar(symbol, query, n=n)
+    return jsonify({
+        "symbol":  symbol,
+        "query":   query,
+        "count":   len(results),
+        "results": results,
     })
 
 

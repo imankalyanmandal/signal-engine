@@ -346,7 +346,7 @@ Rules:
 
     try:
         import json
-        raw    = call_llm(prompt, max_tokens=600)
+        raw    = call_llm(prompt, max_tokens=1500)
         from json_utils import extract_json
         result = extract_json(raw)
 

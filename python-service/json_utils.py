@@ -6,6 +6,9 @@ Gemini 2.5 Flash (and other LLMs) sometimes:
   - Adds preamble text before the JSON
   - Adds explanation text after the JSON
   - Returns unterminated JSON if output is cut off at max_tokens
+  - Adds trailing commas after the last key (invalid JSON)
+  - Adds // comments inside JSON (invalid JSON)
+  - Uses single quotes instead of double quotes
 
 This module provides a single robust extractor used by all analysers.
 """
@@ -22,23 +25,25 @@ def extract_json(raw: str) -> dict:
       - Markdown code fences (```json ... ```)
       - Preamble text before the JSON object
       - Trailing text after the JSON object
-      - Unterminated strings (tries to recover partial JSON)
+      - Unterminated strings / cut-off responses
+      - Trailing commas after last key (Gemini's most common bad habit)
+      - Single-line // comments inside JSON
+      - Single quotes instead of double quotes
 
     Raises ValueError if no JSON object can be found or parsed.
     """
     if not raw or not raw.strip():
         raise ValueError("Empty LLM response")
 
-    # Remove markdown code fences
+    # ── Step 1: strip markdown fences ────────────────────────────────────────
     cleaned = re.sub(r'```(?:json)?\s*', '', raw).strip()
     cleaned = cleaned.replace('```', '').strip()
 
-    # Find the start of the outermost JSON object
+    # ── Step 2: find the outermost JSON object boundaries ────────────────────
     start = cleaned.find('{')
     if start == -1:
         raise ValueError(f"No JSON object found in response: {cleaned[:100]}")
 
-    # Walk forward to find the matching closing brace
     depth     = 0
     end       = -1
     in_string = False
@@ -64,26 +69,47 @@ def extract_json(raw: str) -> dict:
                 end = i + 1
                 break
 
-    if end != -1:
-        # Normal case — well-formed JSON
-        return json.loads(cleaned[start:end])
+    fragment = cleaned[start:end] if end != -1 else cleaned[start:]
 
-    # Unterminated JSON — try to recover by closing the object
-    fragment = cleaned[start:]
-    # Strip any trailing incomplete string value e.g. "rationale": "Stock is stron
-    fragment = re.sub(r',?\s*"[^"]*$', '', fragment)
-    # Strip trailing comma
-    fragment = fragment.rstrip(',').strip()
-    # Close the object
-    fragment = fragment + '}'
-
+    # ── Step 3: try parsing as-is first ──────────────────────────────────────
     try:
         return json.loads(fragment)
     except json.JSONDecodeError:
+        pass
+
+    # ── Step 4: apply repairs and retry ──────────────────────────────────────
+    fragment = _repair_json(fragment)
+    try:
+        return json.loads(fragment)
+    except json.JSONDecodeError as e:
         raise ValueError(
             f"Could not parse JSON even after recovery. "
-            f"Raw response start: {raw[:200]}"
+            f"Error: {e}. Raw response start: {raw[:200]}"
         )
+
+
+def _repair_json(fragment: str) -> str:
+    """
+    Apply a series of repairs to malformed JSON from LLMs.
+    Each repair is independent and non-destructive.
+    """
+    # Remove single-line // comments (not valid JSON)
+    fragment = re.sub(r'//[^\n]*', '', fragment)
+
+    # Remove trailing commas before } or ] (Gemini's most common mistake)
+    fragment = re.sub(r',\s*([}\]])', r'\1', fragment)
+
+    # If the JSON was cut off mid-string, strip the incomplete last key
+    fragment = re.sub(r',?\s*"[^"]*$', '', fragment)
+
+    # Strip any trailing comma left after the above
+    fragment = fragment.rstrip().rstrip(',')
+
+    # Close the object if it was cut off before the final }
+    if not fragment.rstrip().endswith('}'):
+        fragment = fragment.rstrip() + '}'
+
+    return fragment
 
 
 def safe_json_loads(raw: str, fallback: dict) -> dict:

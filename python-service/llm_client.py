@@ -24,31 +24,22 @@ import time
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
-
-# ── API Keys ──────────────────────────────────────────────────────────────────
-
-GEMINI_API_KEY     = os.getenv("GEMINI_API_KEY", "")
-GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
-CEREBRAS_API_KEY   = os.getenv("CEREBRAS_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-GITHUB_TOKEN       = os.getenv("GITHUB_TOKEN", "")
-
-GEMINI_RETRY_DELAY = float(os.getenv("GEMINI_RETRY_DELAY", "4"))
+# Load .env — safe to call multiple times, dotenv is idempotent
+load_dotenv(override=True)
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
 GEMINI_MODEL     = "gemini-2.5-flash"        # upgraded from 2.0-flash (deprecated June 2026)
 GROQ_MODEL       = "llama-3.3-70b-versatile"
-CEREBRAS_MODEL   = "gpt-oss-120b"            # OpenAI open-weight 120B on Cerebras hardware
-OPENROUTER_MODEL = "openrouter/auto"         # auto-routes to best available free model
-GITHUB_MODEL     = "gpt-4o"                  # GPT-4o free via GitHub Marketplace
+CEREBRAS_MODEL   = "gpt-oss-120b"
+OPENROUTER_MODEL = "openrouter/auto"
+GITHUB_MODEL     = "gpt-4o"
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── Endpoints (no keys baked in here) ────────────────────────────────────────
 
-GEMINI_URL     = (
+GEMINI_BASE_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    f"{GEMINI_MODEL}:generateContent"
 )
 GROQ_URL       = "https://api.groq.com/openai/v1/chat/completions"
 CEREBRAS_URL   = "https://api.cerebras.ai/v1/chat/completions"
@@ -62,15 +53,26 @@ def call_llm(prompt: str, max_tokens: int = 1000) -> str:
     """
     Call LLM with 5-tier automatic cloud fallback.
 
+    Keys are read fresh from env on every call — so updating .env
+    takes effect without restarting the server.
+
     Returns the response text.
-    Raises RuntimeError only if ALL configured providers fail simultaneously.
+    Raises RuntimeError only if ALL configured providers fail.
     """
+    # Read keys fresh every call — fixes the import-time capture bug
+    gemini_key     = os.getenv("GEMINI_API_KEY", "")
+    groq_key       = os.getenv("GROQ_API_KEY", "")
+    cerebras_key   = os.getenv("CEREBRAS_API_KEY", "")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+    github_token   = os.getenv("GITHUB_TOKEN", "")
+    retry_delay    = float(os.getenv("GEMINI_RETRY_DELAY", "4"))
+
     providers = [
-        ("Gemini 2.5 Flash", _call_gemini,     GEMINI_API_KEY),
-        ("Groq",             _call_groq,        GROQ_API_KEY),
-        ("Cerebras",         _call_cerebras,    CEREBRAS_API_KEY),
-        ("OpenRouter",       _call_openrouter,  OPENROUTER_API_KEY),
-        ("GitHub Models",    _call_github,      GITHUB_TOKEN),
+        ("Gemini 2.5 Flash", _call_gemini,     gemini_key),
+        ("Groq",             _call_groq,        groq_key),
+        ("Cerebras",         _call_cerebras,    cerebras_key),
+        ("OpenRouter",       _call_openrouter,  openrouter_key),
+        ("GitHub Models",    _call_github,      github_token),
     ]
 
     last_error = None
@@ -80,9 +82,9 @@ def call_llm(prompt: str, max_tokens: int = 1000) -> str:
             print(f"  [LLM] {name} skipped — no key in .env")
             continue
         try:
-            result = fn(prompt, max_tokens)
+            result = fn(prompt, max_tokens, key)
             if name == "Gemini 2.5 Flash":
-                time.sleep(GEMINI_RETRY_DELAY)   # rate limit buffer
+                time.sleep(retry_delay)  # Gemini free tier rate limit buffer
             print(f"  [LLM] ✓ {name}")
             return result
         except Exception as e:
@@ -97,8 +99,8 @@ def call_llm(prompt: str, max_tokens: int = 1000) -> str:
 
 # ── Provider implementations ──────────────────────────────────────────────────
 
-def _call_gemini(prompt: str, max_tokens: int) -> str:
-    """Gemini 2.5 Flash — Google AI Studio REST API (not OpenAI-compatible format)."""
+def _call_gemini(prompt: str, max_tokens: int, api_key: str) -> str:
+    """Gemini — key passed as query param, never embedded in URL."""
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -106,7 +108,12 @@ def _call_gemini(prompt: str, max_tokens: int) -> str:
             "temperature":     0.3,
         },
     }
-    resp = requests.post(GEMINI_URL, json=payload, timeout=30)
+    resp = requests.post(
+        GEMINI_BASE_URL,
+        params={"key": api_key},   # key as param, not in URL string
+        json=payload,
+        timeout=30,
+    )
     resp.raise_for_status()
 
     data       = resp.json()
@@ -131,7 +138,7 @@ def _call_openai_compatible(
 ) -> str:
     """
     Generic OpenAI-compatible Chat Completions call.
-    Groq, Cerebras, OpenRouter, and GitHub Models all use this same format.
+    Groq, Cerebras, OpenRouter, and GitHub Models all use this format.
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -162,41 +169,41 @@ def _call_openai_compatible(
     return content
 
 
-def _call_groq(prompt: str, max_tokens: int) -> str:
+def _call_groq(prompt: str, max_tokens: int, api_key: str) -> str:
     """Groq — fastest inference, llama-3.3-70b, 30 RPM free."""
     return _call_openai_compatible(
-        GROQ_URL, GROQ_API_KEY, GROQ_MODEL, prompt, max_tokens
+        GROQ_URL, api_key, GROQ_MODEL, prompt, max_tokens
     )
 
 
-def _call_cerebras(prompt: str, max_tokens: int) -> str:
+def _call_cerebras(prompt: str, max_tokens: int, api_key: str) -> str:
     """
     Cerebras — 1M tokens/day free, ultra-fast wafer-scale chip inference.
     Free tier has 8K context limit — long prompts are truncated automatically.
     """
-    if len(prompt) > 24000:   # ~8K tokens at ~3 chars/token
+    if len(prompt) > 24000:  # ~8K tokens at ~3 chars/token
         prompt = prompt[:24000] + "\n\n[Prompt truncated for 8K context limit]"
 
     return _call_openai_compatible(
-        CEREBRAS_URL, CEREBRAS_API_KEY, CEREBRAS_MODEL, prompt, max_tokens
+        CEREBRAS_URL, api_key, CEREBRAS_MODEL, prompt, max_tokens
     )
 
 
-def _call_openrouter(prompt: str, max_tokens: int) -> str:
+def _call_openrouter(prompt: str, max_tokens: int, api_key: str) -> str:
     """
     OpenRouter — auto-routes to best available free model.
     30 free models available, 200 req/day without credits.
     """
     return _call_openai_compatible(
-        OPENROUTER_URL, OPENROUTER_API_KEY, OPENROUTER_MODEL, prompt, max_tokens,
+        OPENROUTER_URL, api_key, OPENROUTER_MODEL, prompt, max_tokens,
         extra_headers={
             "HTTP-Referer": "https://github.com/signal-engine",
             "X-Title":      "Signal Engine",
-        }
+        },
     )
 
 
-def _call_github(prompt: str, max_tokens: int) -> str:
+def _call_github(prompt: str, max_tokens: int, api_key: str) -> str:
     """
     GitHub Models — GPT-4o free for all GitHub users.
     Endpoint: https://models.inference.ai.azure.com
@@ -204,7 +211,7 @@ def _call_github(prompt: str, max_tokens: int) -> str:
     Limits:   8K input / 4K output per request, daily rate limits apply.
     """
     return _call_openai_compatible(
-        GITHUB_URL, GITHUB_TOKEN, GITHUB_MODEL, prompt, max_tokens
+        GITHUB_URL, api_key, GITHUB_MODEL, prompt, max_tokens
     )
 
 
@@ -214,15 +221,18 @@ def check_providers() -> dict:
     """
     Returns which providers are configured.
     Called by GET /health in market_service.py.
+    Reads keys fresh so the health endpoint always reflects current .env state.
     """
     configured = {
-        "gemini_2_5_flash": bool(GEMINI_API_KEY),
-        "groq":             bool(GROQ_API_KEY),
-        "cerebras":         bool(CEREBRAS_API_KEY),
-        "openrouter":       bool(OPENROUTER_API_KEY),
-        "github_models":    bool(GITHUB_TOKEN),
+        "gemini_2_5_flash": bool(os.getenv("GEMINI_API_KEY")),
+        "groq":             bool(os.getenv("GROQ_API_KEY")),
+        "cerebras":         bool(os.getenv("CEREBRAS_API_KEY")),
+        "openrouter":       bool(os.getenv("OPENROUTER_API_KEY")),
+        "github_models":    bool(os.getenv("GITHUB_TOKEN")),
     }
-    configured["active_count"] = sum(configured.values())
+    configured["active_count"] = sum(
+        v for k, v in configured.items() if k != "active_count"
+    )
     configured["fallback_chain"] = [
         k for k, v in configured.items()
         if v and k != "active_count"

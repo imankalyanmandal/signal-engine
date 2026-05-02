@@ -8,3 +8,10 @@ feedparser==6.0.11
 pandas>=2.0.0
 multitasking>=0.0.11
 peewee>=3.17.0
+
+# ── RAG dependencies ──────────────────────────────────────────────────────────
+# Vector store — persistent embeddings for concall semantic search
+chromadb>=0.4.22
+
+# Embedding model — all-MiniLM-L6-v2 (~80MB, no GPU needed)
+sentence-transformers>=2.7.0

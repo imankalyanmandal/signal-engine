@@ -79,7 +79,7 @@ def _call_llm_and_parse(symbol, company, context, fund_score, sent_score, conc_s
     """Call LLM via the provider chain and parse JSON response."""
 
     prompt = _build_prompt(company, symbol, context)
-    raw    = call_llm(prompt, max_tokens=1000)
+    raw    = call_llm(prompt, max_tokens=1500)
 
     if raw is None:
         print(f"  [{symbol}] All LLM providers failed — using fallback")

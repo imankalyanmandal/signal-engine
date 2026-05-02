@@ -159,7 +159,7 @@ Respond with ONLY a valid JSON object:
   "swing_impact": "<SHORT_TERM_POSITIVE|SHORT_TERM_NEGATIVE|SHORT_TERM_NEUTRAL>"
 }}"""
 
-    raw = call_llm(prompt, max_tokens=400)
+    raw = call_llm(prompt, max_tokens=1500)
 
     if raw is None:
         return _neutral_result(symbol, "LLM unavailable — sentiment treated as neutral")
