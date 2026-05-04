@@ -15,6 +15,7 @@ import signal_engine.common.management.SignalEngineApplication.StrategyInterface
 import signal_engine.common.management.SignalEngineApplication.model.BacktestResult;
 import signal_engine.common.management.SignalEngineApplication.model.BacktestTrade;
 import signal_engine.common.management.SignalEngineApplication.model.Candle;
+import signal_engine.common.management.SignalEngineApplication.model.WalkForwardConfig;
 
 @Service
 @RequiredArgsConstructor
@@ -22,7 +23,8 @@ public class BacktestService {
 
     private static final Logger log = LoggerFactory.getLogger(BacktestService.class);
 
-    private final Strategy strategy;
+    private final Strategy        strategy;
+    private final IndianCostModel costModel;
 
     @Value("${backtest.initial.capital:100000}")
     private double INITIAL_CAPITAL;
@@ -57,11 +59,36 @@ public class BacktestService {
     private static final double FALLBACK_STOP_PCT = 0.03;
 
     public BacktestResult run(String stockName, List<Candle> candles) {
+        return runWithParams(stockName, candles,
+                INITIAL_CAPITAL, RISK_PER_TRADE, ATR_MULTIPLIER, TAKE_PROFIT_RR,
+                ENTRY_SLIPPAGE, EXIT_SLIPPAGE);
+    }
+
+    /**
+     * Run a backtest with custom risk + cost parameters.
+     * Used by the walk-forward validator so each window can dial in its own
+     * settings without touching application.properties.
+     */
+    public BacktestResult run(String stockName, List<Candle> candles, WalkForwardConfig cfg) {
+        cfg.clampToReasonableBounds();
+        return runWithParams(stockName, candles,
+                cfg.getInitialCapital(),
+                cfg.getRiskPerTrade(),
+                cfg.getAtrMultiplier(),
+                cfg.getTakeProfitRR(),
+                cfg.getEntrySlippage(),
+                cfg.getExitSlippage());
+    }
+
+    private BacktestResult runWithParams(String stockName, List<Candle> candles,
+                                         double initialCapital, double riskPerTrade,
+                                         double atrMultiplier, double takeProfitRR,
+                                         double entrySlippage, double exitSlippage) {
 
         validateCandles(candles);
 
-        double capital     = INITIAL_CAPITAL;
-        double maxCapital  = INITIAL_CAPITAL;
+        double capital     = initialCapital;
+        double maxCapital  = initialCapital;
         double maxDrawdown = 0;
 
         boolean positionOpen    = false;
@@ -100,13 +127,13 @@ public class BacktestService {
             if (positionOpen) {
 
                 if (lowPrice <= stopLossPrice) {
-                    double exitPrice = stopLossPrice * (1 - EXIT_SLIPPAGE);
+                    double exitPrice = stopLossPrice * (1 - exitSlippage);
                     BacktestTrade t  = buildTrade(stockName, entryPrice, exitPrice,
                                                   entryDate, date, quantity, "STOP_LOSS");
                     trades.add(t);
                     tradeReturns.add((exitPrice - entryPrice) / entryPrice);
 
-                    capital          += exitPrice * quantity * (1 - COMMISSION_RATE);
+                    capital          += exitPrice * quantity - costModel.roundTripCost(entryPrice, exitPrice, quantity);
                     positionOpen      = false;
                     lastStopIndex     = i;
                     consecutiveLosses = t.getPnl() < 0 ? consecutiveLosses + 1 : 0;
@@ -115,13 +142,13 @@ public class BacktestService {
                 }
 
                 if (highPrice >= takeProfitPrice) {
-                    double exitPrice = takeProfitPrice * (1 - EXIT_SLIPPAGE);
+                    double exitPrice = takeProfitPrice * (1 - exitSlippage);
                     BacktestTrade t  = buildTrade(stockName, entryPrice, exitPrice,
                                                   entryDate, date, quantity, "TAKE_PROFIT");
                     trades.add(t);
                     tradeReturns.add((exitPrice - entryPrice) / entryPrice);
 
-                    capital          += exitPrice * quantity * (1 - COMMISSION_RATE);
+                    capital          += exitPrice * quantity - costModel.roundTripCost(entryPrice, exitPrice, quantity);
                     positionOpen      = false;
                     consecutiveLosses = t.getPnl() < 0 ? consecutiveLosses + 1 : 0;
                     log.debug("[{}] TAKE_PROFIT exit={} pnl={}", date, exitPrice, t.getPnl());
@@ -150,22 +177,22 @@ public class BacktestService {
                     atr = ATRIndicator.calculate(candles, i, ATR_PERIOD);
                 }
 
-                double actualEntry = closePrice * (1 + ENTRY_SLIPPAGE);
+                double actualEntry = closePrice * (1 + entrySlippage);
 
                 if (atr != null && atr > 0) {
-                    stopDistance  = ATR_MULTIPLIER * atr;
+                    stopDistance  = atrMultiplier * atr;
                 } else {
                     stopDistance  = actualEntry * FALLBACK_STOP_PCT;
                 }
                 stopLossPrice   = actualEntry - stopDistance;
-                takeProfitPrice = actualEntry + (stopDistance * TAKE_PROFIT_RR);
+                takeProfitPrice = actualEntry + (stopDistance * takeProfitRR);
 
-                double riskAmount     = capital * RISK_PER_TRADE;
+                double riskAmount     = capital * riskPerTrade;
                 quantity = Math.floor(riskAmount / stopDistance);
 
                 if (quantity < 1) continue;
 
-                double investmentCost = actualEntry * quantity * (1 + COMMISSION_RATE);
+                double investmentCost = actualEntry * quantity;
                 if (capital < investmentCost) continue;
 
                 positionOpen = true;
@@ -180,13 +207,13 @@ public class BacktestService {
             // ── Priority 4: SELL signal ───────────────────────────────────────
             else if ("SELL".equals(signal) && positionOpen) {
 
-                double exitPrice  = closePrice * (1 - EXIT_SLIPPAGE);
+                double exitPrice  = closePrice * (1 - exitSlippage);
                 BacktestTrade t   = buildTrade(stockName, entryPrice, exitPrice,
                                                entryDate, date, quantity, "SELL_SIGNAL");
                 trades.add(t);
                 tradeReturns.add((exitPrice - entryPrice) / entryPrice);
 
-                capital          += exitPrice * quantity * (1 - COMMISSION_RATE);
+                capital          += exitPrice * quantity - costModel.roundTripCost(entryPrice, exitPrice, quantity);
                 positionOpen      = false;
                 consecutiveLosses = t.getPnl() < 0 ? consecutiveLosses + 1 : 0;
                 log.debug("[{}] SELL_SIGNAL exit={} pnl={}", date, exitPrice, t.getPnl());
@@ -196,19 +223,19 @@ public class BacktestService {
         // ── Force-close open position at end of data ─────────────────────────
         if (positionOpen && !candles.isEmpty()) {
             Candle last       = candles.get(candles.size() - 1);
-            double exitPrice  = last.getClose() * (1 - EXIT_SLIPPAGE);
+            double exitPrice  = last.getClose() * (1 - exitSlippage);
             BacktestTrade t   = buildTrade(stockName, entryPrice, exitPrice,
                                            entryDate, last.getDate(), quantity, "END_OF_DATA");
             trades.add(t);
             tradeReturns.add((exitPrice - entryPrice) / entryPrice);
-            capital += exitPrice * quantity * (1 - COMMISSION_RATE);
+            capital += exitPrice * quantity - costModel.roundTripCost(entryPrice, exitPrice, quantity);
         }
 
         // ── Metrics ───────────────────────────────────────────────────────────
         long wins        = trades.stream().filter(BacktestTrade::isWin).count();
         double winRate   = trades.isEmpty() ? 0 : (wins * 100.0 / trades.size());
-        double totalProfit   = capital - INITIAL_CAPITAL;
-        double returnPercent = (totalProfit / INITIAL_CAPITAL) * 100;
+        double totalProfit   = capital - initialCapital;
+        double returnPercent = (totalProfit / initialCapital) * 100;
 
         double profitFactor    = computeProfitFactor(trades);
         double avgWin          = computeAverageWin(trades);
@@ -245,9 +272,8 @@ public class BacktestService {
     private BacktestTrade buildTrade(String stock, double entry, double exit,
                                      String entryDate, String exitDate,
                                      double qty, String reason) {
-        double entryComm = entry * qty * COMMISSION_RATE;
-        double exitComm  = exit  * qty * COMMISSION_RATE;
-        double pnl = (exit - entry) * qty - entryComm - exitComm;
+        double totalCharges = costModel.roundTripCost(entry, exit, qty);
+        double pnl = (exit - entry) * qty - totalCharges;
 
         return BacktestTrade.builder()
                 .stock(stock)

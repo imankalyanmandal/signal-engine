@@ -839,6 +839,98 @@ async function runPipeline() {
   btn.disabled = false;
 }
 
+// ── On-demand Layer 3 refinement (from pipeline results) ─────────────────────
+// Cache stored on window so it survives across re-renders within the session.
+window._l3Cache = window._l3Cache || {};
+
+async function refineL3Inline(symbol, sector) {
+  const btn  = document.getElementById('l3-btn-'  + symbol);
+  const slot = document.getElementById('l3-slot-' + symbol);
+  if (!slot) return;
+
+  const cached = window._l3Cache[symbol];
+  if (cached) {
+    slot.innerHTML = renderL3Block(cached);
+    return cached;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Refining...'; }
+  slot.innerHTML = '<div style="margin-top:10px;font-family:var(--mono);font-size:10px;color:var(--text2)">Computing entry / stop / target...</div>';
+
+  try {
+    const r = await fetch(`${BASE()}/api/v1/layer3/refine?symbol=${encodeURIComponent(symbol)}&sector=${encodeURIComponent(sector || 'OTHER')}`);
+    if (!r.ok) {
+      const errText = await r.text();
+      throw new Error(errText || `HTTP ${r.status}`);
+    }
+    const result = await r.json();
+    window._l3Cache[symbol] = result;
+    slot.innerHTML = renderL3Block(result);
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Re-refine'; }
+    return result;
+  } catch (e) {
+    slot.innerHTML = `<div style="margin-top:10px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-family:var(--mono);font-size:10px;color:var(--red)">L3 failed: ${e.message}</div>`;
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Retry'; }
+    return null;
+  }
+}
+
+async function refineL3Bulk(items) {
+  const btn = document.getElementById('l3-bulk-btn');
+  if (!Array.isArray(items) || items.length === 0) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = `⏳ Refining 0/${items.length}`; }
+
+  // Run in parallel — 6 month fetches each, but they don't block each other
+  let done = 0;
+  await Promise.all(items.map(async ({symbol, sector}) => {
+    await refineL3Inline(symbol, sector);
+    done++;
+    if (btn) btn.textContent = `⏳ Refining ${done}/${items.length}`;
+  }));
+
+  if (btn) { btn.disabled = false; btn.textContent = '↻ Refine all'; }
+}
+
+function renderL3Block(l3) {
+  if (!l3) return '';
+  const fmt = n => n == null ? '—' : Number(n).toFixed(2);
+  const pct = n => n == null ? '—' : Number(n).toFixed(1) + '%';
+  const sigColor = {
+    'ENTER_NOW':              'var(--green)',
+    'WAIT_FOR_CONFIRMATION':  '#d97706',
+    'AVOID':                  'var(--red)',
+  }[l3.entrySignal] || 'var(--text2)';
+
+  return `
+    <div style="margin-top:10px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-family:var(--mono);font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em">Layer 3 — entry · stop · target</span>
+        <span style="font-family:var(--mono);font-size:11px;color:${sigColor};font-weight:500">${l3.entrySignal || ''}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-family:var(--mono);font-size:11px">
+        <div>
+          <div style="color:var(--text3);font-size:9px;text-transform:uppercase">Entry zone</div>
+          <div style="color:var(--text);margin-top:2px">₹${fmt(l3.entryLow)} – ₹${fmt(l3.entryHigh)}</div>
+        </div>
+        <div>
+          <div style="color:var(--text3);font-size:9px;text-transform:uppercase">Stop loss</div>
+          <div style="color:var(--red);margin-top:2px">₹${fmt(l3.stopLoss)} (${pct(l3.riskPct)})</div>
+        </div>
+        <div>
+          <div style="color:var(--text3);font-size:9px;text-transform:uppercase">Target 1 / 2</div>
+          <div style="color:var(--green);margin-top:2px">₹${fmt(l3.target1)} / ₹${fmt(l3.target2)}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;margin-top:8px;font-family:var(--mono);font-size:10px;color:var(--text2);flex-wrap:wrap">
+        <span>R:R ${fmt(l3.rrRatio1)}× / ${fmt(l3.rrRatio2)}×</span>
+        <span>Hold ~${l3.suggestedHoldDays || '?'}d</span>
+        ${l3.candlePattern && l3.candlePattern !== 'NONE' ? `<span>${l3.candlePattern}</span>` : ''}
+        ${l3.atSupport ? '<span style="color:var(--green)">at support</span>' : ''}
+      </div>
+    </div>`;
+}
+
 function renderPipelineResults(results, shortlist) {
   if (!results.length) return '';
   const passed   = results.filter(r => r.layer2_pass);
@@ -848,7 +940,13 @@ function renderPipelineResults(results, shortlist) {
     const pass = r.layer2_pass;
     const cls  = pass ? 'c-green' : 'c-gray';
     const b    = pass ? 'b-green' : 'b-red';
-    return `<div class="card ${cls}">
+    const sec  = (r.sector || 'OTHER').replace(/'/g, '');
+
+    // Pre-render L3 block from cache if we already have it (from a prior click)
+    const cached = window._l3Cache && window._l3Cache[r.symbol];
+    const cachedHtml = cached ? renderL3Block(cached) : '';
+
+    return `<div class="card ${cls}" id="card-${r.symbol}">
       <div class="row">
         <div>
           <div class="row" style="gap:8px;align-items:center">
@@ -866,14 +964,32 @@ function renderPipelineResults(results, shortlist) {
       </div>
       ${r.rationale ? `<div class="text-muted" style="margin-top:10px">${r.rationale}</div>` : ''}
       ${(r.red_flags || []).length ? `<div style="margin-top:8px;font-family:var(--mono);font-size:10px;color:var(--red)">⚑ ${r.red_flags.join(' · ')}</div>` : ''}
+      ${pass ? `
+        <div style="margin-top:10px;display:flex;justify-content:flex-end">
+          <button class="btn btn-ghost" id="l3-btn-${r.symbol}" style="font-size:11px;padding:4px 10px"
+                  onclick="refineL3Inline('${r.symbol}','${sec}')">
+            ${cached ? '↻ Re-refine' : '⚡ Get entry / stop / target'}
+          </button>
+        </div>
+        <div id="l3-slot-${r.symbol}">${cachedHtml}</div>
+      ` : ''}
     </div>`;
   };
 
+  const passedSymbolsJson = JSON.stringify(passed.map(p => ({symbol:p.symbol, sector:(p.sector||'OTHER')})));
   return `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px">
       <div>
-        <div style="font-family:var(--mono);font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px">
-          ✓ Passed (${passed.length})
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <span style="font-family:var(--mono);font-size:10px;color:var(--green);text-transform:uppercase;letter-spacing:.1em">
+            ✓ Passed (${passed.length})
+          </span>
+          ${passed.length > 1 ? `
+            <button class="btn btn-ghost" id="l3-bulk-btn" style="font-size:10px;padding:4px 10px"
+                    onclick='refineL3Bulk(${passedSymbolsJson})'>
+              ⚡ Refine all
+            </button>
+          ` : ''}
         </div>
         ${passed.map(card).join('') || '<div class="text-muted">None passed</div>'}
       </div>
