@@ -8,7 +8,8 @@ Gemini 2.5 Flash (and other LLMs) sometimes:
   - Returns unterminated JSON if output is cut off at max_tokens
   - Adds trailing commas after the last key (invalid JSON)
   - Adds // comments inside JSON (invalid JSON)
-  - Uses single quotes instead of double quotes
+  - Embeds literal newlines INSIDE string values (Gemini's most subtle bug)
+  - Embeds literal tabs / control characters inside string values
 
 This module provides a single robust extractor used by all analysers.
 """
@@ -20,16 +21,6 @@ import json
 def extract_json(raw: str) -> dict:
     """
     Robustly extract a JSON object from an LLM response string.
-
-    Handles:
-      - Markdown code fences (```json ... ```)
-      - Preamble text before the JSON object
-      - Trailing text after the JSON object
-      - Unterminated strings / cut-off responses
-      - Trailing commas after last key (Gemini's most common bad habit)
-      - Single-line // comments inside JSON
-      - Single quotes instead of double quotes
-
     Raises ValueError if no JSON object can be found or parsed.
     """
     if not raw or not raw.strip():
@@ -38,6 +29,12 @@ def extract_json(raw: str) -> dict:
     # ── Step 1: strip markdown fences ────────────────────────────────────────
     cleaned = re.sub(r'```(?:json)?\s*', '', raw).strip()
     cleaned = cleaned.replace('```', '').strip()
+
+    # ── Step 1.5: pre-escape control chars inside strings ───────────────────
+    # Must happen before boundary detection — otherwise an unescaped newline
+    # inside a string value confuses the brace-matching scanner and we cut the
+    # JSON at the wrong place.
+    cleaned = _escape_control_chars_in_strings(cleaned)
 
     # ── Step 2: find the outermost JSON object boundaries ────────────────────
     start = cleaned.find('{')
@@ -91,31 +88,84 @@ def extract_json(raw: str) -> dict:
 def _repair_json(fragment: str) -> str:
     """
     Apply a series of repairs to malformed JSON from LLMs.
-    Each repair is independent and non-destructive.
+    Note: control-character escaping happens earlier in extract_json's Step 1.5
+    so this function only handles syntactic issues.
     """
-    # Remove single-line // comments (not valid JSON)
+    # Remove single-line // comments
     fragment = re.sub(r'//[^\n]*', '', fragment)
 
-    # Remove trailing commas before } or ] (Gemini's most common mistake)
+    # Remove trailing commas before } or ]
     fragment = re.sub(r',\s*([}\]])', r'\1', fragment)
 
-    # If the JSON was cut off mid-string, strip the incomplete last key
-    fragment = re.sub(r',?\s*"[^"]*$', '', fragment)
+    stripped = fragment.rstrip()
 
-    # Strip any trailing comma left after the above
-    fragment = fragment.rstrip().rstrip(',')
-
-    # Close the object if it was cut off before the final }
-    if not fragment.rstrip().endswith('}'):
-        fragment = fragment.rstrip() + '}'
+    # Only do truncation-recovery if the JSON does NOT already end cleanly.
+    # Otherwise the regex below over-eagerly chops the last key from valid input.
+    if not stripped.endswith('}') and not stripped.endswith(']'):
+        # Step A: count quotes — odd count means an unterminated string at the end
+        if fragment.count('"') % 2 == 1:
+            fragment = fragment + '"'  # close the string
+        # Step B: strip incomplete last key/value (typically `, "key": "..."`)
+        fragment = re.sub(r',?\s*"[^"]*"\s*:\s*"[^"]*"\s*$', '', fragment)
+        fragment = re.sub(r',?\s*"[^"]*"\s*:\s*[^,}\]]*$',   '', fragment)
+        # Step C: clean up any leftover trailing commas/whitespace
+        fragment = fragment.rstrip().rstrip(',').rstrip()
+        # Step D: close the object
+        if not fragment.endswith('}'):
+            fragment = fragment + '}'
 
     return fragment
+
+
+def _escape_control_chars_in_strings(fragment: str) -> str:
+    """
+    Walk the fragment character by character. While inside a quoted string,
+    replace literal control characters (newline, tab, carriage return,
+    backspace, form feed) with their JSON-escaped equivalents.
+
+    This fixes the most common Gemini bug — embedding line breaks in summary
+    fields without escaping them as \\n. Outside strings, control chars are
+    left alone (they're allowed as JSON whitespace).
+    """
+    out       = []
+    in_string = False
+    escape    = False
+
+    for ch in fragment:
+        if escape:
+            out.append(ch)
+            escape = False
+            continue
+
+        if ch == '\\' and in_string:
+            out.append(ch)
+            escape = True
+            continue
+
+        if ch == '"':
+            out.append(ch)
+            in_string = not in_string
+            continue
+
+        if in_string:
+            if   ch == '\n': out.append('\\n')
+            elif ch == '\r': out.append('\\r')
+            elif ch == '\t': out.append('\\t')
+            elif ch == '\b': out.append('\\b')
+            elif ch == '\f': out.append('\\f')
+            elif ord(ch) < 0x20:
+                out.append('\\u%04x' % ord(ch))
+            else:
+                out.append(ch)
+        else:
+            out.append(ch)
+
+    return ''.join(out)
 
 
 def safe_json_loads(raw: str, fallback: dict) -> dict:
     """
     Like extract_json but never raises — returns fallback dict on any failure.
-    Use this when you want silent degradation.
     """
     try:
         return extract_json(raw)

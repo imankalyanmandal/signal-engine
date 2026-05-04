@@ -11,9 +11,12 @@ import signal_engine.common.management.SignalEngineApplication.Service.BacktestS
 import signal_engine.common.management.SignalEngineApplication.Service.MarketDataClient;
 import signal_engine.common.management.SignalEngineApplication.Service.Nifty50ScannerService;
 import signal_engine.common.management.SignalEngineApplication.Service.StockDataService;
+import signal_engine.common.management.SignalEngineApplication.Service.WalkForwardService;
 import signal_engine.common.management.SignalEngineApplication.model.BacktestResult;
 import signal_engine.common.management.SignalEngineApplication.model.Candle;
 import signal_engine.common.management.SignalEngineApplication.model.Nifty50ScanResult;
+import signal_engine.common.management.SignalEngineApplication.model.WalkForwardConfig;
+import signal_engine.common.management.SignalEngineApplication.model.WalkForwardResult;
 
 @RestController
 @RequestMapping("/api/v1/backtest")
@@ -25,6 +28,7 @@ public class BacktestController {
     private final StockDataService      stockDataService;
     private final MarketDataClient      marketDataClient;
     private final Nifty50ScannerService nifty50ScannerService;
+    private final WalkForwardService    walkForwardService;
 
     // ── Single stock — live data ───────────────────────────────────────────────
     // GET /api/v1/backtest/run?stock=HDFCBANK&period=1y
@@ -175,6 +179,45 @@ public class BacktestController {
                     "layer2",          layer2Results
             ));
 
+        } catch (RuntimeException e) {
+            return ResponseEntity.internalServerError().body(e.getMessage());
+        }
+    }
+
+    // ── Walk-Forward Validation ───────────────────────────────────────────────
+    // POST /api/v1/backtest/walk-forward?stock=HDFCBANK&period=5y
+    //
+    // Body (optional — defaults applied if missing):
+    //   {
+    //     "trainDays":      504,
+    //     "testDays":       126,
+    //     "rollDays":       126,
+    //     "riskPerTrade":   0.01,
+    //     "atrMultiplier":  2.0,
+    //     "takeProfitRR":   2.0,
+    //     "entrySlippage":  0.0025,
+    //     "exitSlippage":   0.0025,
+    //     "initialCapital": 100000
+    //   }
+    @PostMapping("/walk-forward")
+    public ResponseEntity<?> walkForward(
+            @RequestParam String stock,
+            @RequestParam(defaultValue = "5y")  String period,
+            @RequestParam(defaultValue = "NS")  String exchange,
+            @RequestBody(required = false) WalkForwardConfig config
+    ) {
+        if (!isValidSymbol(stock))      return badRequest("Invalid symbol");
+        if (!isValidPeriod(period))     return badRequest("Invalid period. Use: 1mo, 3mo, 6mo, 1y, 2y, 5y");
+        if (!isValidExchange(exchange)) return badRequest("Invalid exchange. Use NS or BO");
+
+        WalkForwardConfig cfg = config == null ? new WalkForwardConfig() : config;
+
+        try {
+            List<Candle> candles = marketDataClient.fetchCandles(stock, period, exchange);
+            WalkForwardResult result = walkForwardService.run(stock, candles, cfg);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return badRequest(e.getMessage());
         } catch (RuntimeException e) {
             return ResponseEntity.internalServerError().body(e.getMessage());
         }
